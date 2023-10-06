@@ -29,7 +29,7 @@ public class QueryTool {
   private static final int URL = 2;
   private static final int IS_VSON_STORE = 3;
   private static final int SSL_CONFIG_FILE_PATH = 4;
-  private static final int REQUIRED_ARGS_COUNT = 5;
+  private static final int REQUIRED_ARGS_COUNT = 6;
 
   public static void main(String[] args) throws Exception {
     if (args.length < REQUIRED_ARGS_COUNT) {
@@ -42,11 +42,12 @@ public class QueryTool {
     String url = removeQuotes(args[URL]);
     boolean isVsonStore = Boolean.parseBoolean(removeQuotes(args[IS_VSON_STORE]));
     String sslConfigFilePath = removeQuotes(args[SSL_CONFIG_FILE_PATH]);
+    int count = Integer.parseInt(removeQuotes(args[5]));
     Optional<String> sslConfigFilePathArgs =
         StringUtils.isEmpty(sslConfigFilePath) ? Optional.empty() : Optional.of(sslConfigFilePath);
     System.out.println();
 
-    Map<String, String> outputMap = queryStoreForKey(store, keyString, url, isVsonStore, sslConfigFilePathArgs);
+    Map<String, String> outputMap = queryStoreForKey(store, keyString, url, isVsonStore, sslConfigFilePathArgs, count);
     outputMap.entrySet().stream().forEach(System.out::println);
   }
 
@@ -55,7 +56,8 @@ public class QueryTool {
       String keyString,
       String url,
       boolean isVsonStore,
-      Optional<String> sslConfigFile) throws Exception {
+      Optional<String> sslConfigFile,
+      int count) throws Exception {
 
     SSLFactory factory = null;
     if (sslConfigFile.isPresent()) {
@@ -80,7 +82,7 @@ public class QueryTool {
               .getInnerStoreClient();
       Schema keySchema = castClient.getKeySchema();
 
-      Object key = null;
+      Object key;
       // Transfer vson schema to avro schema.
       while (keySchema.getType().equals(Schema.Type.UNION)) {
         keySchema = VsonAvroSchemaAdapter.stripFromUnion(keySchema);
@@ -88,7 +90,13 @@ public class QueryTool {
       key = convertKey(keyString, keySchema);
       System.out.println("Key string parsed successfully. About to make the query.");
 
-      Object value = client.get(key).get(15, TimeUnit.SECONDS);
+      Object value = null;
+      for (int i = 0; i < count; i++) {
+        long start = System.nanoTime();
+        value = client.get(key).get(15, TimeUnit.SECONDS);
+        long end = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+        System.out.println(i + ". Elapsed time : " + end + "ms");
+      }
 
       outputMap.put("key-class", key.getClass().getCanonicalName());
       outputMap.put("value-class", value == null ? "null" : value.getClass().getCanonicalName());
