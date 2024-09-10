@@ -1087,7 +1087,7 @@ public class ActiveActiveStoreIngestionTask extends LeaderFollowerStoreIngestion
         upstreamOffsetsByKafkaURLs);
 
     // In case new topic is empty and leader can never become online
-    defaultReadyToServeChecker.apply(partitionConsumptionState);
+    // defaultReadyToServeChecker.apply(partitionConsumptionState);
   }
 
   /**

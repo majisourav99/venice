@@ -230,7 +230,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
    * Keeps track of producer states inside version topic that drainer threads have processed so far. Producers states in this validator will be
    * flushed to the metadata partition of the storage engine regularly in {@link #syncOffset(String, PartitionConsumptionState)}
    */
-  private final KafkaDataIntegrityValidator kafkaDataIntegrityValidator;
+  protected final KafkaDataIntegrityValidator kafkaDataIntegrityValidator;
   protected final HostLevelIngestionStats hostLevelIngestionStats;
   protected final AggVersionedDIVStats versionedDIVStats;
   protected final AggVersionedIngestionStats versionedIngestionStats;
@@ -1819,7 +1819,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
           }
         }
       }
-      if (!isCompletedReport) {
+      if (!isCompletedReport && !newPartitionConsumptionState.isCompletionReported()) {
         defaultReadyToServeChecker.apply(newPartitionConsumptionState);
       }
     } catch (VeniceInconsistentStoreMetadataException e) {
@@ -2297,7 +2297,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
         : databaseSyncBytesIntervalForTransactionalMode;
     boolean recordsProcessedAboveSyncIntervalThreshold = (syncBytesInterval > 0
         && (partitionConsumptionState.getProcessedRecordSizeSinceLastSync() >= syncBytesInterval));
-    defaultReadyToServeChecker.apply(partitionConsumptionState, recordsProcessedAboveSyncIntervalThreshold);
+    // defaultReadyToServeChecker.apply(partitionConsumptionState, recordsProcessedAboveSyncIntervalThreshold);
 
     /**
      * Syncing offset checking in syncOffset() should be the very last step for processing a record.
@@ -3763,7 +3763,6 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
                     getStoragePartitionConfig(partitionConsumptionState));
               }
             }
-
             warmupSchemaCache(store);
           }
           if (suppressLiveUpdates) {

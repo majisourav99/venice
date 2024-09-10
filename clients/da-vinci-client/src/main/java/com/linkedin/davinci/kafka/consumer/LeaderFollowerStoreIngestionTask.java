@@ -571,7 +571,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
              * In extreme case, if there is no message in real-time topic, there will be no new message after leader switch
              * to the real-time topic, so `isReadyToServe()` check will never be invoked.
              */
-            defaultReadyToServeChecker.apply(partitionConsumptionState);
+            // defaultReadyToServeChecker.apply(partitionConsumptionState);
           }
           break;
 
@@ -650,6 +650,12 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
           // no long running task for follower
           break;
       }
+      long syncBytesInterval = partitionConsumptionState.isDeferredWrite()
+          ? databaseSyncBytesIntervalForDeferredWriteMode
+          : databaseSyncBytesIntervalForTransactionalMode;
+      boolean recordsProcessedAboveSyncIntervalThreshold = (syncBytesInterval > 0
+          && (partitionConsumptionState.getProcessedRecordSizeSinceLastSync() >= syncBytesInterval));
+      defaultReadyToServeChecker.apply(partitionConsumptionState, recordsProcessedAboveSyncIntervalThreshold);
     }
     if (emitMetrics.get()) {
       hostLevelIngestionStats
@@ -928,7 +934,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
         upstreamStartOffset);
 
     // In case new topic is empty and leader can never become online
-    defaultReadyToServeChecker.apply(partitionConsumptionState);
+    // defaultReadyToServeChecker.apply(partitionConsumptionState);
   }
 
   protected void syncConsumedUpstreamRTOffsetMapIfNeeded(
