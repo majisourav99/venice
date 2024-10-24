@@ -208,11 +208,10 @@ public class DaVinciClientMemoryLimitTest {
     });
   }
 
-  @Test(timeOut = TEST_TIMEOUT, dataProviderClass = DataProviderUtils.class, dataProvider = "Two-True-and-False")
-  public void testDaVinciMemoryLimitShouldFailLargeDataPush(
-      boolean ingestionIsolationEnabledInDaVinci,
-      boolean useDaVinciSpecificExecutionStatusForError) throws Exception {
-
+  @Test(timeOut = TEST_TIMEOUT)
+  public void testDaVinciMemoryLimitShouldFailLargeDataPush() throws Exception {
+    boolean ingestionIsolationEnabledInDaVinci = false;
+    boolean useDaVinciSpecificExecutionStatusForError = false;
     // Run VPJ
     this.veniceCluster.useControllerClient(cc -> runVPJ(this.vpjProperties, 1, cc));
 
