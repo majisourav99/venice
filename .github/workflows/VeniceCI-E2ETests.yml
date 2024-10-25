@@ -53,7 +53,8 @@ jobs:
         with:
         #  artifact: ${{ github.job }}-artifacts            # artifact name
           name: JEST Tests                  # Name of the check run which will be created
-          path: 'internal/venice-test-common/build/test-results/integrationTests_1000/TEST-*.xml'                      # Path to test results (inside artifact .zip)
+          #path: 'internal/venice-test-common/build/test-results/integrationTests_1000/TEST-*.xml'                      # Path to test results (inside artifact .zip)
+          path: '**/*.xml'
           reporter: java-junit              # Format of test results
 
       - name: Upload Build Artifacts
