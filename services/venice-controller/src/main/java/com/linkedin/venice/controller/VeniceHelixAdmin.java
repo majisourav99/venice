@@ -274,6 +274,7 @@ import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LeaderStandbySMD;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.model.MaintenanceSignal;
+import org.apache.helix.model.RESTConfig;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.participant.StateMachineEngine;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
@@ -3512,7 +3513,7 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
       PubSubTopic rtTopic = pubSubTopicRepository.getTopic(Version.composeRealTimeTopic(storeName));
       if (!store.isHybrid() && getTopicManager().containsTopic(rtTopic)) {
         store = resources.getStoreMetadataRepository().getStore(storeName);
-        safeDeleteRTTopic(clusterName, storeName, store);
+        safeDeleteRTTopic(clusterName, store);
       }
     }
   }
@@ -3527,17 +3528,29 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
     }
   }
 
-  private void safeDeleteRTTopic(String clusterName, String storeName, Store store) {
+  private void safeDeleteRTTopic(String clusterName, Store store) {
+    if (isRTTopicDeletionPermittedByAllControllers(clusterName, store)) {
+      deleteRTTopic(clusterName, store.getName());
+    }
+  }
+
+  public boolean isRTTopicDeletionPermittedByAllControllers(String clusterName, Store store) {
     // Perform RT cleanup checks for batch only store that used to be hybrid. Check the local versions first
     // to see if any version is still using RT and then also check other fabrics before deleting the RT. Since
     // we perform this check everytime when a store version is deleted we can afford to do best effort
     // approach if some fabrics are unavailable or out of sync (temporarily).
-    boolean canDeleteRT = !Version.containsHybridVersion(store.getVersions());
+    String storeName = store.getName();
+    String rtTopicName = Version.composeRealTimeTopic(storeName);
+    if (Version.containsHybridVersion(store.getVersions())) {
+      LOGGER.warn(
+          "Topic {} cannot be deleted yet because the store {} has at least one hybrid version",
+          rtTopicName,
+          storeName);
+      return false;
+    }
+
     Map<String, ControllerClient> controllerClientMap = getControllerClientMap(clusterName);
     for (Map.Entry<String, ControllerClient> controllerClientEntry: controllerClientMap.entrySet()) {
-      if (!canDeleteRT) {
-        return;
-      }
       StoreResponse storeResponse = controllerClientEntry.getValue().getStore(storeName);
       if (storeResponse.isError()) {
         LOGGER.warn(
@@ -3546,24 +3559,37 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
             clusterName,
             controllerClientEntry.getKey(),
             storeResponse.getError());
-        return;
+        return false;
       }
-      canDeleteRT = !Version.containsHybridVersion(storeResponse.getStore().getVersions());
+      if (Version.containsHybridVersion(storeResponse.getStore().getVersions())) {
+        LOGGER.warn(
+            "Topic {} cannot be deleted yet because the store {} has at least one hybrid version",
+            rtTopicName,
+            storeName);
+        return false;
+      }
     }
-    if (canDeleteRT) {
-      String rtTopicToDelete = Version.composeRealTimeTopic(storeName);
-      truncateKafkaTopic(rtTopicToDelete);
-      for (ControllerClient controllerClient: controllerClientMap.values()) {
-        controllerClient.deleteKafkaTopic(rtTopicToDelete);
-      }
-      // Check if there is incremental push topic exist. If yes, delete it and send out to let other controller to
-      // delete it.
-      String incrementalPushRTTopicToDelete = Version.composeSeparateRealTimeTopic(storeName);
-      if (getTopicManager().containsTopic(pubSubTopicRepository.getTopic(incrementalPushRTTopicToDelete))) {
-        truncateKafkaTopic(incrementalPushRTTopicToDelete);
-        for (ControllerClient controllerClient: controllerClientMap.values()) {
-          controllerClient.deleteKafkaTopic(incrementalPushRTTopicToDelete);
-        }
+    return true;
+  }
+
+  private void deleteRTTopic(String clusterName, String storeName) {
+    Map<String, ControllerClient> controllerClientMap = getControllerClientMap(clusterName);
+    String rtTopicToDelete = Version.composeRealTimeTopic(storeName);
+    deleteRTTopicFromAllFabrics(rtTopicToDelete, controllerClientMap);
+    // Check if there is incremental push topic exist. If yes, delete it and send out to let other controller to
+    // delete it.
+    String incrementalPushRTTopicToDelete = Version.composeSeparateRealTimeTopic(storeName);
+    if (getTopicManager().containsTopic(pubSubTopicRepository.getTopic(incrementalPushRTTopicToDelete))) {
+      deleteRTTopicFromAllFabrics(incrementalPushRTTopicToDelete, controllerClientMap);
+    }
+  }
+
+  private void deleteRTTopicFromAllFabrics(String topic, Map<String, ControllerClient> controllerClientMap) {
+    truncateKafkaTopic(topic);
+    for (ControllerClient controllerClient: controllerClientMap.values()) {
+      ControllerResponse deleteResponse = controllerClient.deleteKafkaTopic(topic);
+      if (deleteResponse.isError()) {
+        LOGGER.error("Deleting real time topic " + topic + " encountered error " + deleteResponse.getError());
       }
     }
   }
@@ -6298,7 +6324,13 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
       helixClusterConfig.setTopology("/" + HelixUtils.TOPOLOGY_CONSTRAINT);
       helixClusterConfig.setFaultZoneType(HelixUtils.TOPOLOGY_CONSTRAINT);
 
-      helixAdminClient.createVeniceStorageCluster(clusterName, helixClusterConfig);
+      RESTConfig restConfig = null;
+      if (!StringUtils.isEmpty(clusterConfigs.getHelixRestCustomizedHealthUrl())) {
+        restConfig = new RESTConfig(clusterName);
+        restConfig.set(RESTConfig.SimpleFields.CUSTOMIZED_HEALTH_URL, clusterConfigs.getHelixRestCustomizedHealthUrl());
+      }
+
+      helixAdminClient.createVeniceStorageCluster(clusterName, helixClusterConfig, restConfig);
     }
     if (!helixAdminClient.isClusterInGrandCluster(clusterName)) {
       helixAdminClient.addClusterToGrandCluster(clusterName);
@@ -7411,7 +7443,7 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
     if (storeName.isPresent()) {
       /**
        * Legacy stores venice_system_store_davinci_push_status_store_<cluster_name> still exist.
-       * But {@link com.linkedin.venice.helix.HelixReadOnlyStoreRepositoryAdapter#getStore(String)} cannot find
+       * But {@link HelixReadOnlyStoreRepositoryAdapter#getStore(String)} cannot find
        * them by store names. Skip davinci push status stores until legacy znodes are cleaned up.
        */
       VeniceSystemStoreType systemStoreType = VeniceSystemStoreType.getSystemStoreType(storeName.get());
