@@ -56,8 +56,8 @@ jobs:
          path: '**/TEST-*.xml'
          fail-on-error: 'false'
          max-annotations: '10'
-         list-tests: 'all'
-         list-suites: 'all'
+         list-tests: 'failed'
+         list-suites: 'failed'
          reporter: java-junit
       - name: Upload Build Artifacts
         if: success() || failure()
