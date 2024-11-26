@@ -119,9 +119,10 @@ public class ConfigKeys {
       "pubsub.topic.manager.metadata.fetcher.thread.pool.size";
 
   /**
-   * How long to wait for the next poll request after unsubscribing, indicating that old messages were processed.
+   * During a state transition, it is unsafe to proceed without waiting for all inflight messages to be processed.
+   * This controls how long to wait for inflight messages after unsubscribing from a topic during a state transition.
    */
-  public static final String SERVER_WAIT_AFTER_UNSUBSCRIBE_TIMEOUT_MS = "server.wait.after.unsubscribe.timeout.ms";
+  public static final String SERVER_MAX_WAIT_AFTER_UNSUBSCRIBE_MS = "server.max.wait.after.unsubscribe.ms";
 
   // Cluster specific configs for controller
   public static final String CONTROLLER_NAME = "controller.name";
@@ -336,7 +337,7 @@ public class ConfigKeys {
       "controller.storage.cluster.helix.cloud.enabled";
 
   /**
-   * What cloud environment the controller is in. Maps to {@link org.apache.helix.cloud.constants.CloudProvider} Default is empty string.
+   * What cloud environment the controller is in. Maps to {@link org.apache.helix.cloud.constants.CloudProvider}. Default is empty string.
    */
   public static final String CONTROLLER_HELIX_CLOUD_PROVIDER = "controller.helix.cloud.provider";
 
@@ -351,7 +352,13 @@ public class ConfigKeys {
   public static final String CONTROLLER_HELIX_CLOUD_INFO_SOURCES = "controller.helix.cloud.info.sources";
 
   /**
-   * Name of the function that processes the fetching and parsing of cloud information. Default is empty string.
+   * Package name of the class that processes the fetching and parsing of cloud information. Default is empty string.
+   */
+  public static final String CONTROLLER_HELIX_CLOUD_INFO_PROCESSOR_PACKAGE =
+      "controller.helix.cloud.info.processor.package";
+
+  /**
+   * Name of the class that processes the fetching and parsing of cloud information. Default is empty string.
    */
   public static final String CONTROLLER_HELIX_CLOUD_INFO_PROCESSOR_NAME = "controller.helix.cloud.info.processor.name";
 
