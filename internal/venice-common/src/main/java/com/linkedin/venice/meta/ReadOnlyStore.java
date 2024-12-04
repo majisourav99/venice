@@ -143,6 +143,16 @@ public class ReadOnlyStore implements Store {
     }
 
     @Override
+    public String getRealTimeTopicName() {
+      return this.delegate.getRealTimeTopicName();
+    }
+
+    @Override
+    public void setRealTimeTopicName(String realTimeTopicName) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
     public HybridStoreConfig clone() {
       return this.delegate.clone();
     }
@@ -514,6 +524,11 @@ public class ReadOnlyStore implements Store {
     }
 
     @Override
+    public boolean isHybrid() {
+      return this.delegate.isHybrid();
+    }
+
+    @Override
     public HybridStoreConfig getHybridStoreConfig() {
       HybridStoreConfig config = this.delegate.getHybridStoreConfig();
       if (config == null) {
@@ -577,6 +592,36 @@ public class ReadOnlyStore implements Store {
     @Override
     public void setDataRecoveryVersionConfig(DataRecoveryVersionConfig dataRecoveryVersionConfig) {
       throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public String getTargetSwapRegion() {
+      return delegate.getTargetSwapRegion();
+    }
+
+    @Override
+    public int getTargetSwapRegionWaitTime() {
+      return delegate.getTargetSwapRegionWaitTime();
+    }
+
+    @Override
+    public void setTargetSwapRegion(String targetRegion) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setTargetSwapRegionWaitTime(int waitTime) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setIsDavinciHeartbeatReported(boolean isReported) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean getIsDavinciHeartbeatReported() {
+      return delegate.getIsDavinciHeartbeatReported();
     }
 
     @Override
@@ -1420,6 +1465,36 @@ public class ReadOnlyStore implements Store {
   @Override
   public void setNearlineProducerCountPerWriter(int producerCnt) {
     throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public String getTargetSwapRegion() {
+    return delegate.getTargetSwapRegion();
+  }
+
+  @Override
+  public int getTargetSwapRegionWaitTime() {
+    return delegate.getTargetSwapRegionWaitTime();
+  }
+
+  @Override
+  public void setTargetSwapRegion(String targetRegion) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public void setTargetSwapRegionWaitTime(int waitTime) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public void setIsDavinciHeartbeatReported(boolean isReported) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public boolean getIsDavinciHeartbeatReported() {
+    return delegate.getIsDavinciHeartbeatReported();
   }
 
   @Override

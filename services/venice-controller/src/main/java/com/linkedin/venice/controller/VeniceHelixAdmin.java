@@ -9,6 +9,7 @@ import static com.linkedin.venice.ConfigKeys.SSL_TO_KAFKA_LEGACY;
 import static com.linkedin.venice.controller.UserSystemStoreLifeCycleHelper.AUTO_META_SYSTEM_STORE_PUSH_ID_PREFIX;
 import static com.linkedin.venice.meta.HybridStoreConfigImpl.DEFAULT_HYBRID_OFFSET_LAG_THRESHOLD;
 import static com.linkedin.venice.meta.HybridStoreConfigImpl.DEFAULT_HYBRID_TIME_LAG_THRESHOLD;
+import static com.linkedin.venice.meta.HybridStoreConfigImpl.DEFAULT_REAL_TIME_TOPIC_NAME;
 import static com.linkedin.venice.meta.HybridStoreConfigImpl.DEFAULT_REWIND_TIME_IN_SECONDS;
 import static com.linkedin.venice.meta.Store.NON_EXISTING_VERSION;
 import static com.linkedin.venice.meta.Version.PushType;
@@ -3516,7 +3517,7 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
       PubSubTopic rtTopic = pubSubTopicRepository.getTopic(Version.composeRealTimeTopic(storeName));
       if (!store.isHybrid() && getTopicManager().containsTopic(rtTopic)) {
         store = resources.getStoreMetadataRepository().getStore(storeName);
-        safeDeleteRTTopic(clusterName, store);
+        safeDeleteRTTopic(clusterName, storeName, store);
       }
     }
   }
@@ -3531,29 +3532,17 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
     }
   }
 
-  private void safeDeleteRTTopic(String clusterName, Store store) {
-    if (isRTTopicDeletionPermittedByAllControllers(clusterName, store)) {
-      deleteRTTopic(clusterName, store.getName());
-    }
-  }
-
-  public boolean isRTTopicDeletionPermittedByAllControllers(String clusterName, Store store) {
+  private void safeDeleteRTTopic(String clusterName, String storeName, Store store) {
     // Perform RT cleanup checks for batch only store that used to be hybrid. Check the local versions first
     // to see if any version is still using RT and then also check other fabrics before deleting the RT. Since
     // we perform this check everytime when a store version is deleted we can afford to do best effort
     // approach if some fabrics are unavailable or out of sync (temporarily).
-    String storeName = store.getName();
-    String rtTopicName = Version.composeRealTimeTopic(storeName);
-    if (Version.containsHybridVersion(store.getVersions())) {
-      LOGGER.warn(
-          "Topic {} cannot be deleted yet because the store {} has at least one hybrid version",
-          rtTopicName,
-          storeName);
-      return false;
-    }
-
+    boolean canDeleteRT = !Version.containsHybridVersion(store.getVersions());
     Map<String, ControllerClient> controllerClientMap = getControllerClientMap(clusterName);
     for (Map.Entry<String, ControllerClient> controllerClientEntry: controllerClientMap.entrySet()) {
+      if (!canDeleteRT) {
+        return;
+      }
       StoreResponse storeResponse = controllerClientEntry.getValue().getStore(storeName);
       if (storeResponse.isError()) {
         LOGGER.warn(
@@ -3562,37 +3551,24 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
             clusterName,
             controllerClientEntry.getKey(),
             storeResponse.getError());
-        return false;
+        return;
       }
-      if (Version.containsHybridVersion(storeResponse.getStore().getVersions())) {
-        LOGGER.warn(
-            "Topic {} cannot be deleted yet because the store {} has at least one hybrid version",
-            rtTopicName,
-            storeName);
-        return false;
+      canDeleteRT = !Version.containsHybridVersion(storeResponse.getStore().getVersions());
+    }
+    if (canDeleteRT) {
+      String rtTopicToDelete = Version.composeRealTimeTopic(storeName);
+      truncateKafkaTopic(rtTopicToDelete);
+      for (ControllerClient controllerClient: controllerClientMap.values()) {
+        controllerClient.deleteKafkaTopic(rtTopicToDelete);
       }
-    }
-    return true;
-  }
-
-  private void deleteRTTopic(String clusterName, String storeName) {
-    Map<String, ControllerClient> controllerClientMap = getControllerClientMap(clusterName);
-    String rtTopicToDelete = Version.composeRealTimeTopic(storeName);
-    deleteRTTopicFromAllFabrics(rtTopicToDelete, controllerClientMap);
-    // Check if there is incremental push topic exist. If yes, delete it and send out to let other controller to
-    // delete it.
-    String incrementalPushRTTopicToDelete = Version.composeSeparateRealTimeTopic(storeName);
-    if (getTopicManager().containsTopic(pubSubTopicRepository.getTopic(incrementalPushRTTopicToDelete))) {
-      deleteRTTopicFromAllFabrics(incrementalPushRTTopicToDelete, controllerClientMap);
-    }
-  }
-
-  private void deleteRTTopicFromAllFabrics(String topic, Map<String, ControllerClient> controllerClientMap) {
-    truncateKafkaTopic(topic);
-    for (ControllerClient controllerClient: controllerClientMap.values()) {
-      ControllerResponse deleteResponse = controllerClient.deleteKafkaTopic(topic);
-      if (deleteResponse.isError()) {
-        LOGGER.error("Deleting real time topic " + topic + " encountered error " + deleteResponse.getError());
+      // Check if there is incremental push topic exist. If yes, delete it and send out to let other controller to
+      // delete it.
+      String incrementalPushRTTopicToDelete = Version.composeSeparateRealTimeTopic(storeName);
+      if (getTopicManager().containsTopic(pubSubTopicRepository.getTopic(incrementalPushRTTopicToDelete))) {
+        truncateKafkaTopic(incrementalPushRTTopicToDelete);
+        for (ControllerClient controllerClient: controllerClientMap.values()) {
+          controllerClient.deleteKafkaTopic(incrementalPushRTTopicToDelete);
+        }
       }
     }
   }
@@ -4779,6 +4755,7 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
     Optional<Long> hybridTimeLagThreshold = params.getHybridTimeLagThreshold();
     Optional<DataReplicationPolicy> hybridDataReplicationPolicy = params.getHybridDataReplicationPolicy();
     Optional<BufferReplayPolicy> hybridBufferReplayPolicy = params.getHybridBufferReplayPolicy();
+    Optional<String> realTimeTopicName = params.getRealTimeTopicName();
     Optional<Boolean> accessControlled = params.getAccessControlled();
     Optional<CompressionStrategy> compressionStrategy = params.getCompressionStrategy();
     Optional<Boolean> clientDecompressionEnabled = params.getClientDecompressionEnabled();
@@ -4818,6 +4795,9 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
     Optional<Boolean> blobTransferEnabled = params.getBlobTransferEnabled();
     Optional<Boolean> nearlineProducerCompressionEnabled = params.getNearlineProducerCompressionEnabled();
     Optional<Integer> nearlineProducerCountPerWriter = params.getNearlineProducerCountPerWriter();
+    Optional<String> targetSwapRegion = params.getTargetSwapRegion();
+    Optional<Integer> targetSwapRegionWaitTime = params.getTargetRegionSwapWaitTime();
+    Optional<Boolean> isDavinciHeartbeatReported = params.getIsDavinciHeartbeatReported();
 
     final Optional<HybridStoreConfig> newHybridStoreConfig;
     if (hybridRewindSeconds.isPresent() || hybridOffsetLagThreshold.isPresent() || hybridTimeLagThreshold.isPresent()
@@ -4828,7 +4808,8 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
           hybridOffsetLagThreshold,
           hybridTimeLagThreshold,
           hybridDataReplicationPolicy,
-          hybridBufferReplayPolicy);
+          hybridBufferReplayPolicy,
+          realTimeTopicName);
       newHybridStoreConfig = Optional.ofNullable(hybridConfig);
     } else {
       newHybridStoreConfig = Optional.empty();
@@ -5111,6 +5092,21 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
         return store;
       }));
 
+      targetSwapRegion.ifPresent(aString -> storeMetadataUpdate(clusterName, storeName, store -> {
+        store.setTargetSwapRegion((aString));
+        return store;
+      }));
+
+      targetSwapRegionWaitTime.ifPresent(aInt -> storeMetadataUpdate(clusterName, storeName, store -> {
+        store.setTargetSwapRegionWaitTime(aInt);
+        return store;
+      }));
+
+      isDavinciHeartbeatReported.ifPresent(aBool -> storeMetadataUpdate(clusterName, storeName, store -> {
+        store.setIsDavinciHeartbeatReported(aBool);
+        return store;
+      }));
+
       LOGGER.info("Finished updating store: {} in cluster: {}", storeName, clusterName);
     } catch (VeniceException e) {
       LOGGER.error(
@@ -5160,7 +5156,8 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
                 hybridStoreConfig.getOffsetLagThresholdToGoOnline(),
                 hybridStoreConfig.getProducerTimestampLagThresholdToGoOnlineInSeconds(),
                 DataReplicationPolicy.NON_AGGREGATE,
-                hybridStoreConfig.getBufferReplayPolicy()));
+                hybridStoreConfig.getBufferReplayPolicy(),
+                hybridStoreConfig.getRealTimeTopicName()));
       }
       return store;
     });
@@ -5222,7 +5219,8 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
       Optional<Long> hybridOffsetLagThreshold,
       Optional<Long> hybridTimeLagThreshold,
       Optional<DataReplicationPolicy> hybridDataReplicationPolicy,
-      Optional<BufferReplayPolicy> bufferReplayPolicy) {
+      Optional<BufferReplayPolicy> bufferReplayPolicy,
+      Optional<String> realTimeTopicName) {
     if (!hybridRewindSeconds.isPresent() && !hybridOffsetLagThreshold.isPresent() && !oldStore.isHybrid()) {
       return null; // For the nullable union in the avro record
     }
@@ -5240,7 +5238,8 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
           hybridDataReplicationPolicy.isPresent()
               ? hybridDataReplicationPolicy.get()
               : oldHybridConfig.getDataReplicationPolicy(),
-          bufferReplayPolicy.isPresent() ? bufferReplayPolicy.get() : oldHybridConfig.getBufferReplayPolicy());
+          bufferReplayPolicy.isPresent() ? bufferReplayPolicy.get() : oldHybridConfig.getBufferReplayPolicy(),
+          realTimeTopicName.orElseGet(oldHybridConfig::getRealTimeTopicName));
     } else {
       // switching a non-hybrid store to hybrid; must specify:
       // 1. rewind time
@@ -5258,7 +5257,8 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
           hybridOffsetLagThreshold.orElse(DEFAULT_HYBRID_OFFSET_LAG_THRESHOLD),
           hybridTimeLagThreshold.orElse(DEFAULT_HYBRID_TIME_LAG_THRESHOLD),
           hybridDataReplicationPolicy.orElse(DataReplicationPolicy.NON_AGGREGATE),
-          bufferReplayPolicy.orElse(BufferReplayPolicy.REWIND_FROM_EOP));
+          bufferReplayPolicy.orElse(BufferReplayPolicy.REWIND_FROM_EOP),
+          realTimeTopicName.orElse(DEFAULT_REAL_TIME_TOPIC_NAME));
     }
     if (mergedHybridStoreConfig.getRewindTimeInSeconds() > 0
         && mergedHybridStoreConfig.getOffsetLagThresholdToGoOnline() < 0
@@ -7440,7 +7440,7 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
     if (storeName.isPresent()) {
       /**
        * Legacy stores venice_system_store_davinci_push_status_store_<cluster_name> still exist.
-       * But {@link HelixReadOnlyStoreRepositoryAdapter#getStore(String)} cannot find
+       * But {@link com.linkedin.venice.helix.HelixReadOnlyStoreRepositoryAdapter#getStore(String)} cannot find
        * them by store names. Skip davinci push status stores until legacy znodes are cleaned up.
        */
       VeniceSystemStoreType systemStoreType = VeniceSystemStoreType.getSystemStoreType(storeName.get());
@@ -7825,7 +7825,8 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
           hybridStoreConfigRecord.offsetLagThresholdToGoOnline,
           hybridStoreConfigRecord.producerTimestampLagThresholdToGoOnlineInSeconds,
           DataReplicationPolicy.valueOf(hybridStoreConfigRecord.dataReplicationPolicy),
-          BufferReplayPolicy.valueOf(hybridStoreConfigRecord.bufferReplayPolicy));
+          BufferReplayPolicy.valueOf(hybridStoreConfigRecord.bufferReplayPolicy),
+          hybridStoreConfigRecord.realTimeTopicName.toString());
     }
     return isHybrid(hybridStoreConfig);
   }

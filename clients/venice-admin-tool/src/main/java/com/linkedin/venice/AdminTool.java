@@ -1125,6 +1125,7 @@ public class AdminTool {
     booleanParam(cmd, Arg.SEPARATE_REALTIME_TOPIC_ENABLED, p -> params.setSeparateRealTimeTopicEnabled(p), argSet);
     booleanParam(cmd, Arg.WRITE_COMPUTATION_ENABLED, p -> params.setWriteComputationEnabled(p), argSet);
     booleanParam(cmd, Arg.READ_COMPUTATION_ENABLED, p -> params.setReadComputationEnabled(p), argSet);
+    booleanParam(cmd, Arg.ENABLE_STORE_MIGRATION, p -> params.setStoreMigration(p), argSet);
     integerParam(
         cmd,
         Arg.BOOTSTRAP_TO_ONLINE_TIMEOUT_IN_HOUR,
@@ -1167,6 +1168,9 @@ public class AdminTool {
         p -> params.setNearlineProducerCompressionEnabled(p),
         argSet);
     integerParam(cmd, Arg.NEARLINE_PRODUCER_COUNT_PER_WRITER, p -> params.setNearlineProducerCountPerWriter(p), argSet);
+    genericParam(cmd, Arg.TARGET_SWAP_REGION, s -> s, p -> params.setTargetRegionSwap(p), argSet);
+    integerParam(cmd, Arg.TARGET_SWAP_REGION_WAIT_TIME, p -> params.setTargetRegionSwapWaitTime(p), argSet);
+    booleanParam(cmd, Arg.DAVINCI_HEARTBEAT_REPORTED, p -> params.setIsDavinciHeartbeatReported(p), argSet);
 
     /**
      * {@link Arg#REPLICATE_ALL_CONFIGS} doesn't require parameters; once specified, it means true.
