@@ -11,7 +11,7 @@ plugins {
   id 'com.diffplug.spotless' version '6.12.0'
   id 'com.dorongold.task-tree' version '2.1.0'
   id 'com.github.johnrengelman.shadow' version '7.1.2' apply false
-  id 'com.github.spotbugs' version '4.8.0' apply false
+  id 'com.github.spotbugs' version '5.0.14' apply false
   id 'org.gradle.test-retry' version '1.6.0' apply false
   id 'com.form.diff-coverage' version '0.9.5' apply false
   id 'me.champeau.jmh' version '0.6.7' apply false
@@ -371,7 +371,7 @@ subprojects {
         enabled = project.hasProperty('spotbugs.xml')
       }
       html {
-        enabled = !reports.getByName('XML').enabled
+//        enabled = !reports.getByName('XML').enabled
         stylesheet = 'fancy-hist.xsl'
       }
     })

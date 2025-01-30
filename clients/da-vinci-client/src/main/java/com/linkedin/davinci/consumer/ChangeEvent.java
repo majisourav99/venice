@@ -16,4 +16,16 @@ public class ChangeEvent<T> {
   public T getCurrentValue() {
     return currentValue;
   }
+
+  public class Counter2 {
+    private int count = 0;
+
+    public void increment() {
+      count++;
+    }
+
+    public int getCount() {
+      return count;
+    }
+  }
 }
