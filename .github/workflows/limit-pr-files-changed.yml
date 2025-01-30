@@ -15,24 +15,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Find the PR associated with this branch
-        id: find_pr
-        uses: peter-evans/find-pull-request@v2
-        with:
-          state: open
-      - name: Fetch PR details
+      - name: Fetch PR Title via GitHub API
         id: pr_details
         run: |
-         PR_NUMBER=${{ steps.find_pr.outputs.pr_number }}
-          echo "PR Number: $PR_NUMBER"
-       
-         # Fetch PR details using GitHub API
-         PR_DESCRIPTION=$(gh pr view $PR_NUMBER --json body -q .body)
-         echo "pr_description=$PR_DESCRIPTION" >> $GITHUB_ENV
-         echo "PR_TITLE=${{ steps.find_pr.outputs.pr_title }}" >> $GITHUB_ENV
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          PR_TITLE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER" | jq -r '.title')
+          echo "pr_title=$PR_TITLE" >> $GITHUB_ENV
+          PR_DESCRIPTION=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \ -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER" | jq -r '.body')
+          echo "pr_description=$PR_DESCRIPTION" >> $GITHUB_ENV
+    
       - name: Check for Override Keyword
         id: check_override
         run: |
@@ -40,7 +34,7 @@ jobs:
           OVERRIDE_KEYWORD="DIFFSIZEOVERRIDE"
           
           # Check PR title and body for the keyword
-          if echo "${{ steps.find_pr.outputs.pr_title }}${{ env.pr_description }}" | grep -iq "$OVERRIDE_KEYWORD"; then
+          if echo "${{ env.pr_title }}${{ env.pr_description }}" | grep -iq "$OVERRIDE_KEYWORD"; then
             echo "Override keyword found. Skipping validation."
             echo "override=true" >> $GITHUB_OUTPUT
           else
