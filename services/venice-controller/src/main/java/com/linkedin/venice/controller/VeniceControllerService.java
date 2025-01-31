@@ -65,6 +65,7 @@ public class VeniceControllerService extends AbstractVeniceService {
       Optional<SupersetSchemaGenerator> externalSupersetSchemaGenerator,
       PubSubTopicRepository pubSubTopicRepository,
       PubSubClientsFactory pubSubClientsFactory) {
+    Admin admin1;
     this.multiClusterConfigs = multiClusterConfigs;
 
     DelegatingClusterLeaderInitializationRoutine initRoutineForPushJobDetailsSystemStore =
@@ -94,8 +95,9 @@ public class VeniceControllerService extends AbstractVeniceService {
         pubSubClientsFactory,
         Arrays.asList(initRoutineForPushJobDetailsSystemStore, initRoutineForHeartbeatSystemStore));
 
+    admin1 = null;
     if (multiClusterConfigs.isParent()) {
-      this.admin = new VeniceParentHelixAdmin(
+      admin1 = new VeniceParentHelixAdmin(
           internalAdmin,
           multiClusterConfigs,
           sslEnabled,
@@ -110,9 +112,10 @@ public class VeniceControllerService extends AbstractVeniceService {
           initRoutineForHeartbeatSystemStore);
       LOGGER.info("Controller works as a parent controller.");
     } else {
-      this.admin = internalAdmin;
+      admin1 = internalAdmin;
       LOGGER.info("Controller works as a child controller.");
     }
+    this.admin = admin1;
     Optional<SchemaReader> kafkaMessageEnvelopeSchemaReader = Optional.empty();
     try {
       kafkaMessageEnvelopeSchemaReader = routerClientConfig.isPresent()
