@@ -25,8 +25,12 @@ jobs:
           echo "pr_title=$PR_TITLE" >> $GITHUB_ENV
           PR_DESCRIPTION=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \ -H "Accept: application/vnd.github.v3+json" \
           "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER" | jq -r '.body')
-          echo "pr_description=$PR_DESCRIPTION" >> $GITHUB_ENV
-    
+          {
+             echo "pr_description<<EOF"
+             echo "$PR_DESCRIPTION"
+             echo "EOF"
+          } >> "$GITHUB_ENV"
+
       - name: Check for Override Keyword
         id: check_override
         run: |
