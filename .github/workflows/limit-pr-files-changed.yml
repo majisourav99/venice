@@ -38,7 +38,7 @@ jobs:
           OVERRIDE_KEYWORD="DIFFSIZEOVERRIDE"
           
           # Check PR title and body for the keyword
-          if echo "${{ env.pr_title }}${{ env.pr_description }}" | grep -iq "$OVERRIDE_KEYWORD"; then
+          if printf "%s%s" "${{ env.pr_title }}${{ env.pr_description }}" | grep -iq "$OVERRIDE_KEYWORD"; then
             echo "Override keyword found. Skipping validation."
             echo "override=true" >> $GITHUB_OUTPUT
           else
@@ -49,7 +49,8 @@ jobs:
         id: lines_changed_per_file
         run: |
           # Define the maximum allowed lines changed per file
-          MAX_LINES=500
+          JAVA_MAX_LINES=500
+          SCHEMA_MAX_LINES=1500
           MAX_TOTAL_LINES_ADDED=2000
           TOTAL_LINED_ADDED=0
           # Get the diff of the PR and process each file
@@ -76,6 +77,12 @@ jobs:
           echo "File: $file, Lines Changed: $TOTAL"
 
           # Check if the total exceeds the max allowed
+          if [ "$JAVA_FILE" = "true" ]; then
+            MAX_LINES=$JAVA_MAX_LINES
+          elif [ "$SCHEMA_FILE" = "true" ]; then
+            MAX_LINES=$SCHEMA_MAX_LINES
+          fi
+          
           if [ "$TOTAL" -gt "$MAX_LINES" ]; then
             echo "File $file exceeds the maximum allowed lines changed ($TOTAL > $MAX_LINES)"
             EXCEEDED=true
