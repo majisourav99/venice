@@ -104,7 +104,7 @@ public class RocksDBMemoryStats extends AbstractVeniceStats {
         return total;
       }, metric));
     }
-    registerSensor(new AsyncGauge((ignored, ignored2) -> memoryLimit, "memory_limit"));
+    registerSensor(new AsyncGauge((ignored, ignored2) -> memoryLimit, "memory_limit_111"));
     registerSensor(new AsyncGauge((ignored, ignored2) -> {
       if (memoryLimit > 0 && sstFileManager != null) {
         return sstFileManager.getTotalSize();
