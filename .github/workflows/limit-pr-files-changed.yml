@@ -38,7 +38,7 @@ jobs:
           OVERRIDE_KEYWORD="DIFFSIZEOVERRIDE"
           
           # Check PR title and body for the keyword
-          if printf "%s%s" "${{ env.pr_title }}${{ env.pr_description }}" | grep -iq "$OVERRIDE_KEYWORD"; then
+          if printf "%s%s" "$pr_title$pr_description" | grep -iq "$OVERRIDE_KEYWORD"; then
             echo "Override keyword found. Skipping validation."
             echo "override=true" >> $GITHUB_OUTPUT
           else
