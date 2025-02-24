@@ -184,7 +184,6 @@ public class AdminConsumptionTaskTest {
     // By default, current controller is the leader controller
     doReturn(true).when(admin).isLeaderControllerFor(clusterName);
     doReturn(true).when(admin).isAdminTopicConsumptionEnabled(clusterName);
-
     offsetManager = new InMemoryOffsetManager();
     adminTopicMetadataAccessor = new InMemoryAdminTopicMetadataAccessor();
 
@@ -982,7 +981,6 @@ public class AdminConsumptionTaskTest {
       setStore.updatedConfigsList.add(PARTITIONER_CLASS);
       setStore.updatedConfigsList.add(PARTITIONER_PARAMS);
     }
-
     AdminOperation adminMessage = new AdminOperation();
     adminMessage.operationType = AdminMessageType.UPDATE_STORE.getValue();
     adminMessage.payloadUnion = setStore;
@@ -998,6 +996,7 @@ public class AdminConsumptionTaskTest {
     task.close();
     executor.shutdown();
     executor.awaitTermination(TIMEOUT, TimeUnit.MILLISECONDS);
+    doReturn(true).when(admin).hasStore(clusterName, storeName);
 
     // Not checking if contents of Optional are present or not since if they're not present, exception will be raised
     // and it would fail the test.
