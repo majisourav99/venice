@@ -315,6 +315,15 @@ public class AdminExecutionTask implements Callable<Void> {
   private void handleValueSchemaCreation(ValueSchemaCreation message) {
     String clusterName = message.clusterName.toString();
     String storeName = message.storeName.toString();
+
+    if (!admin.hasStore(clusterName, storeName)) {
+      LOGGER.warn(
+          "Ignoring value schema creation command for non-existent store {} in cluster {}",
+          storeName,
+          clusterName);
+      return;
+    }
+
     String schemaStr = message.schema.definition.toString();
     final int schemaId = message.schemaId;
 
@@ -364,6 +373,15 @@ public class AdminExecutionTask implements Callable<Void> {
   private void handleDisableStoreWrite(PauseStore message) {
     String clusterName = message.clusterName.toString();
     String storeName = message.storeName.toString();
+
+    if (!admin.hasStore(clusterName, storeName)) {
+      LOGGER.warn(
+          "Ignoring disable store write  command for non-existent store {} in cluster {}",
+          storeName,
+          clusterName);
+      return;
+    }
+
     admin.setStoreWriteability(clusterName, storeName, false);
 
     LOGGER.info("Disabled store to write: {} in cluster: {}", storeName, clusterName);
@@ -372,6 +390,13 @@ public class AdminExecutionTask implements Callable<Void> {
   private void handleEnableStoreWrite(ResumeStore message) {
     String clusterName = message.clusterName.toString();
     String storeName = message.storeName.toString();
+
+    if (!admin.hasStore(clusterName, storeName)) {
+      LOGGER
+          .warn("Ignoring enable store write  command for non-existent store {} in cluster {}", storeName, clusterName);
+      return;
+    }
+
     admin.setStoreWriteability(clusterName, storeName, true);
 
     LOGGER.info("Enabled store to write: {} in cluster: {}", storeName, clusterName);
@@ -380,6 +405,13 @@ public class AdminExecutionTask implements Callable<Void> {
   private void handleDisableStoreRead(DisableStoreRead message) {
     String clusterName = message.clusterName.toString();
     String storeName = message.storeName.toString();
+
+    if (!admin.hasStore(clusterName, storeName)) {
+      LOGGER
+          .warn("Ignoring disable store read  command for non-existent store {} in cluster {}", storeName, clusterName);
+      return;
+    }
+
     admin.setStoreReadability(clusterName, storeName, false);
 
     LOGGER.info("Disabled store to read: {} in cluster: {}", storeName, clusterName);
@@ -388,6 +420,13 @@ public class AdminExecutionTask implements Callable<Void> {
   private void handleEnableStoreRead(EnableStoreRead message) {
     String clusterName = message.clusterName.toString();
     String storeName = message.storeName.toString();
+
+    if (!admin.hasStore(clusterName, storeName)) {
+      LOGGER
+          .warn("Ignoring enable store read  command for non-existent store {} in cluster {}", storeName, clusterName);
+      return;
+    }
+
     admin.setStoreReadability(clusterName, storeName, true);
     LOGGER.info("Enabled store to read: {} in cluster: {}", storeName, clusterName);
   }
@@ -407,6 +446,15 @@ public class AdminExecutionTask implements Callable<Void> {
   private void handleDeleteAllVersions(DeleteAllVersions message) {
     String clusterName = message.clusterName.toString();
     String storeName = message.storeName.toString();
+
+    if (!admin.hasStore(clusterName, storeName)) {
+      LOGGER.warn(
+          "Ignoring delete store versions  command for non-existent store {} in cluster {}",
+          storeName,
+          clusterName);
+      return;
+    }
+
     admin.deleteAllVersionsInStore(clusterName, storeName);
     LOGGER.info("Deleted all of version in store: {} in cluster: {}", storeName, clusterName);
   }
@@ -415,6 +463,11 @@ public class AdminExecutionTask implements Callable<Void> {
     String clusterName = message.clusterName.toString();
     String storeName = message.storeName.toString();
     int versionNum = message.versionNum;
+    if (!admin.hasStore(clusterName, storeName)) {
+      LOGGER
+          .warn("Ignoring delete-old-version command for non-existent store {} in cluster {}", storeName, clusterName);
+      return;
+    }
     // Delete an old version for a Venice store.
     admin.deleteOldVersionInStore(clusterName, storeName, versionNum);
     LOGGER.info("Deleted version: {} in store: {} in cluster: {}", versionNum, storeName, clusterName);
@@ -424,6 +477,13 @@ public class AdminExecutionTask implements Callable<Void> {
     String clusterName = message.clusterName.toString();
     String storeName = message.storeName.toString();
     int version = message.currentVersion;
+
+    if (!admin.hasStore(clusterName, storeName)) {
+      LOGGER
+          .warn("Ignoring set-current-version command for non-existent store {} in cluster {}", storeName, clusterName);
+      return;
+    }
+
     admin.setStoreCurrentVersion(clusterName, storeName, version);
 
     LOGGER.info("Set store: {} version to {} in cluster: {}", storeName, version, clusterName);
@@ -442,6 +502,13 @@ public class AdminExecutionTask implements Callable<Void> {
     String clusterName = message.clusterName.toString();
     String storeName = message.storeName.toString();
     int partitionNum = message.partitionNum;
+
+    if (!admin.hasStore(clusterName, storeName)) {
+      LOGGER
+          .warn("Ignoring set-partition-count command for non-existent store {} in cluster {}", storeName, clusterName);
+      return;
+    }
+
     admin.setStorePartitionCount(clusterName, storeName, partitionNum);
 
     LOGGER.info("Set store: {} partition number to {} in cluster: {}", storeName, partitionNum, clusterName);
@@ -450,6 +517,11 @@ public class AdminExecutionTask implements Callable<Void> {
   private void handleSetStore(UpdateStore message) {
     String clusterName = message.clusterName.toString();
     String storeName = message.storeName.toString();
+
+    if (!admin.hasStore(clusterName, storeName)) {
+      LOGGER.warn("Ignoring update-store command for non-existent store {} in cluster {}", storeName, clusterName);
+      return;
+    }
 
     UpdateStoreQueryParams params = new UpdateStoreQueryParams().setOwner(message.owner.toString())
         .setEnableReads(message.enableReads)
