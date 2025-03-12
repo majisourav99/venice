@@ -159,6 +159,7 @@ import static com.linkedin.venice.ConfigKeys.SERVER_SEP_RT_LEADER_QUOTA_RECORDS_
 import static com.linkedin.venice.ConfigKeys.SERVER_SHARED_CONSUMER_ASSIGNMENT_STRATEGY;
 import static com.linkedin.venice.ConfigKeys.SERVER_SHARED_CONSUMER_NON_EXISTING_TOPIC_CLEANUP_DELAY_MS;
 import static com.linkedin.venice.ConfigKeys.SERVER_SHUTDOWN_DISK_UNHEALTHY_TIME_MS;
+import static com.linkedin.venice.ConfigKeys.SERVER_SKIP_CHECK_AFTER_UNSUB_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_SOURCE_TOPIC_OFFSET_CHECK_INTERVAL_MS;
 import static com.linkedin.venice.ConfigKeys.SERVER_SSL_HANDSHAKE_QUEUE_CAPACITY;
 import static com.linkedin.venice.ConfigKeys.SERVER_SSL_HANDSHAKE_THREAD_POOL_SIZE;
@@ -510,6 +511,8 @@ public class VeniceServerConfig extends VeniceClusterConfig {
   private final boolean resetErrorReplicaEnabled;
 
   private final boolean adaptiveThrottlerEnabled;
+  private final boolean skipChecksAfterUnSubEnabled;
+
   private final int adaptiveThrottlerSignalIdleThreshold;
   private final double adaptiveThrottlerSingleGetLatencyThreshold;
 
@@ -703,6 +706,7 @@ public class VeniceServerConfig extends VeniceClusterConfig {
         serverProperties.getBoolean(SERVER_DB_READ_ONLY_FOR_BATCH_ONLY_STORE_ENABLED, true);
     resetErrorReplicaEnabled = serverProperties.getBoolean(SERVER_RESET_ERROR_REPLICA_ENABLED, false);
     adaptiveThrottlerEnabled = serverProperties.getBoolean(SERVER_ADAPTIVE_THROTTLER_ENABLED, false);
+    skipChecksAfterUnSubEnabled = serverProperties.getBoolean(SERVER_SKIP_CHECK_AFTER_UNSUB_ENABLED, true);
     adaptiveThrottlerSignalIdleThreshold = serverProperties.getInt(SERVER_ADAPTIVE_THROTTLER_SIGNAL_IDLE_THRESHOLD, 10);
     adaptiveThrottlerSingleGetLatencyThreshold =
         serverProperties.getDouble(SERVER_ADAPTIVE_THROTTLER_SINGLE_GET_LATENCY_THRESHOLD, 10d);
@@ -1574,6 +1578,10 @@ public class VeniceServerConfig extends VeniceClusterConfig {
 
   public boolean isAdaptiveThrottlerEnabled() {
     return adaptiveThrottlerEnabled;
+  }
+
+  public boolean isSkipChecksAfterUnSubEnabled() {
+    return skipChecksAfterUnSubEnabled;
   }
 
   public int getAdaptiveThrottlerSignalIdleThreshold() {
