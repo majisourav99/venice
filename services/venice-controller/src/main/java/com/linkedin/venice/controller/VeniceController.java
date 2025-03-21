@@ -392,6 +392,8 @@ public class VeniceController {
     adminServer.start();
     if (sslEnabled) {
       secureAdminServer.start();
+    } else {
+      secureAdminServer.close();
     }
 
     topicCleanupService.start();
