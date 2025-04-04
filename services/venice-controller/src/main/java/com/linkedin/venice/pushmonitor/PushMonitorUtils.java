@@ -82,13 +82,12 @@ public class PushMonitorUtils {
     } else {
       // DaVinci starts using new status key format, which contains status for all partitions in one key.
       // Only batch pushes will use this key; incremental pushes will still use partition level status key.
-      LOGGER.info("Got Da Vinci version level push status for topic: {}", topicName);
       final int totalInstanceCount = instances.size();
       ExecutionStatus completeStatus = incrementalPushVersion.isPresent()
           ? ExecutionStatus.END_OF_INCREMENTAL_PUSH_RECEIVED
           : ExecutionStatus.COMPLETED;
       int completedInstanceCount = 0;
-      boolean allInstancesCompleted = true;
+      boolean allInstancesCompleted = totalInstanceCount > 0;
       int liveInstanceCount = 0;
       int offlineInstanceCount = 0;
       Optional<String> erroredInstance = Optional.empty();

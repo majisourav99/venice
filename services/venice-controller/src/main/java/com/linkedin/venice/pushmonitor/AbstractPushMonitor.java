@@ -557,14 +557,14 @@ public abstract class AbstractPushMonitor
         if (elapsedTimeInSec < TimeUnit.MILLISECONDS.toSeconds(offlineJobResourceAssignmentWaitTimeInMilliseconds)) {
           LOGGER.info(
               "After waiting for " + elapsedTimeInSec + " seconds, resource assignment for: " + topic
-                  + " is still not complete, strategy=" + strategy.toString() + ", replicationFactor="
-                  + replicationFactor + ", reason=" + notReadyReason.get());
+                  + " is still not complete, strategy=" + strategy + ", replicationFactor=" + replicationFactor
+                  + ", reason=" + notReadyReason.get());
         } else {
           // early termination
           // Time out, after waiting maxWaitTimeMs, there are not enough nodes assigned.
           recordPushPreparationDuration(topic, elapsedTimeInSec);
           String errorMsg = "After waiting for " + elapsedTimeInSec + " seconds, resource assignment for: " + topic
-              + " timed out, strategy=" + strategy.toString() + ", replicationFactor=" + replicationFactor + ", reason="
+              + " timed out, strategy=" + strategy + ", replicationFactor=" + replicationFactor + ", reason="
               + notReadyReason.get();
           ExecutionStatusWithDetails executionStatusWithDetails = new ExecutionStatusWithDetails(ERROR, errorMsg);
           handleTerminalOfflinePushUpdate(pushStatus, executionStatusWithDetails);
@@ -579,10 +579,15 @@ public abstract class AbstractPushMonitor
           if (newStatus != null) {
             pushStatus = newStatus;
           }
+          pushStatusCollector.handleServerPushStatusUpdate(
+              pushStatus.getKafkaTopic(),
+              ExecutionStatus.STARTED,
+              pushStatus.getStatusDetails());
           recordPushPreparationDuration(topic, getDurationInSec(pushStatus));
         }
       }
     }
+
     return new ExecutionStatusWithDetails(
         currentPushStatus,
         pushStatus.getStatusDetails(),
@@ -1036,7 +1041,8 @@ public abstract class AbstractPushMonitor
         pushStatus.getKafkaTopic(),
         statusWithDetails.getStatus());
     if (status.equals(ExecutionStatus.COMPLETED)) {
-      pushStatusCollector.handleServerPushStatusUpdate(pushStatus.getKafkaTopic(), COMPLETED, null);
+      pushStatusCollector
+          .handleServerPushStatusUpdate(pushStatus.getKafkaTopic(), COMPLETED, statusWithDetails.getDetails());
     } else if (status.isError()) {
       String statusDetailsString = "STATUS DETAILS ABSENT.";
       if (statusWithDetails.getDetails() == null) {

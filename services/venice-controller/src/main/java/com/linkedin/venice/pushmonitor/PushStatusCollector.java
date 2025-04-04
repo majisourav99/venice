@@ -156,11 +156,12 @@ public class PushStatusCollector {
       String storeName = Version.parseStoreFromKafkaTopicName(pushStatus.topicName);
       Store store = storeRepository.getStore(storeName);
       if (daVinciStatus.isNoDaVinciStatusReport()) {
-        LOGGER.info(
-            "Received empty DaVinci status report for topic: {}. Server status: {}, DvcStatus: {}",
-            pushStatus.topicName,
-            pushStatus.getServerStatus(),
-            daVinciStatus);
+        if (pushStatus.getServerStatus() != null) {
+          LOGGER.info(
+              "Received empty DaVinci status report for topic: {}. Server status: {}",
+              pushStatus.topicName,
+              pushStatus.getServerStatus());
+        }
         // poll DaVinci status more
         int noDaVinciStatusRetryAttempts = topicToNoDaVinciStatusRetryCountMap.compute(pushStatus.topicName, (k, v) -> {
           if (v == null) {
@@ -169,7 +170,7 @@ public class PushStatusCollector {
           return v + 1;
         });
         if (noDaVinciStatusRetryAttempts <= daVinciPushStatusNoReportRetryMaxAttempts) {
-          daVinciStatus = new ExecutionStatusWithDetails(ExecutionStatus.NOT_STARTED, daVinciStatus.getDetails());
+          daVinciStatus = new ExecutionStatusWithDetails(ExecutionStatus.UNKNOWN, daVinciStatus.getDetails());
           pushStatus.setDaVinciStatus(daVinciStatus);
         } else {
           topicToNoDaVinciStatusRetryCountMap.remove(pushStatus.topicName);
@@ -192,13 +193,27 @@ public class PushStatusCollector {
           storeRepository.updateStore(store);
         }
       }
-
-      LOGGER.info(
-          "Received DaVinci status: {} for topic: {} and server status: {}",
-          daVinciStatus,
-          pushStatus.topicName,
-          pushStatus.getServerStatus());
       ExecutionStatusWithDetails serverStatus = pushStatus.getServerStatus();
+      if (pushStatus.getDaVinciStatus().isNoDaVinciStatusReport() && pushStatus.getServerStatus() != null) {
+        LOGGER.info(
+            "Received server status: {} for topic: {}",
+            serverStatus.getStatusUpdateTimestamp() != null || serverStatus.getDetails() != null
+                ? serverStatus
+                : serverStatus.getStatus(),
+            pushStatus.topicName);
+      } else {
+        if (pushStatus.getServerStatus() != null) {
+          LOGGER.info(
+              "Received DaVinci status: {} for topic: {} and server status: {}",
+              daVinciStatus,
+              pushStatus.topicName,
+              serverStatus.getStatusUpdateTimestamp() != null || serverStatus.getDetails() != null
+                  ? serverStatus
+                  : serverStatus.getStatus());
+        } else {
+          LOGGER.info("Received DaVinci status: {} for topic: {}.", daVinciStatus, pushStatus.topicName);
+        }
+      }
       if (serverStatus == null) {
         continue;
       }
@@ -242,7 +257,7 @@ public class PushStatusCollector {
   public void handleServerPushStatusUpdate(String topicName, ExecutionStatus executionStatus, String detailsString) {
     // Update the server topic status in the data structure and wait for async DVC status scan thread to pick up.
     TopicPushStatus topicPushStatus = topicToPushStatusMap.computeIfPresent(topicName, (topic, pushStatus) -> {
-      pushStatus.setServerStatus(new ExecutionStatusWithDetails(executionStatus, detailsString));
+      pushStatus.setServerStatus(new ExecutionStatusWithDetails(executionStatus, detailsString, false));
       return pushStatus;
     });
     // If scanning is not enabled or the topic is not subscribed for DVC push status scanning we will directly handle
