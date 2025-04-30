@@ -749,7 +749,7 @@ public class VeniceSystemProducer implements SystemProducer, Closeable {
       valueObject = objectWithTimestamp.getObject();
     }
 
-    if (valueObject == null) {
+    if (valueObject == null && key != null) {
       if (logicalTimestamp > 0) {
         veniceWriter.delete(key, logicalTimestamp, callback);
       } else {
