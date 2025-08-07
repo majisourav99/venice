@@ -8,6 +8,7 @@ import static com.linkedin.venice.ConfigKeys.KAFKA_PRODUCER_RETRIES_CONFIG;
 import static com.linkedin.venice.ConfigKeys.MULTI_REGION;
 import static com.linkedin.venice.ConfigKeys.VENICE_PARTITIONERS;
 import static com.linkedin.venice.VeniceConstants.DEFAULT_SSL_FACTORY_CLASS_NAME;
+import static com.linkedin.venice.meta.Store.NON_EXISTING_VERSION;
 import static com.linkedin.venice.status.BatchJobHeartbeatConfigs.HEARTBEAT_ENABLED_CONFIG;
 import static com.linkedin.venice.utils.AvroSupersetSchemaUtils.validateSubsetValueSchema;
 import static com.linkedin.venice.utils.ByteUtils.generateHumanReadableByteCountString;
@@ -567,9 +568,12 @@ public class VenicePushJob implements AutoCloseable {
           "Could not get repush info for store " + userProvidedStoreName + " with error: "
               + pushJobSetting.repushInfoResponse.getError());
     }
-    int version = pushJobSetting.repushInfoResponse.getRepushInfo().getVersion().getNumber();
-    pushJobSetting.repushSourceVersion = version;
-    return Version.composeKafkaTopic(userProvidedStoreName, version);
+    Version version = pushJobSetting.repushInfoResponse.getRepushInfo().getVersion();
+    int versionNum = version.getRepushSourceVersion() > NON_EXISTING_VERSION
+        ? version.getRepushSourceVersion()
+        : version.getNumber();
+    pushJobSetting.repushSourceVersion = versionNum;
+    return Version.composeKafkaTopic(userProvidedStoreName, versionNum);
   }
 
   private String getUserProvidedTopicName(final String userProvidedStoreName, String userProvidedTopicName) {
