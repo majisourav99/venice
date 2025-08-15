@@ -622,6 +622,8 @@ public interface Admin extends AutoCloseable, Closeable {
 
   void setAdminConsumerService(String clusterName, AdminConsumerService service);
 
+  AdminConsumerService getAdminConsumerService(String clusterName);
+
   /**
    * The admin consumption task tries to deal with failures to process an admin message by retrying.  If there is a
    * message that cannot be processed for some reason, we will need to forcibly skip that message in order to unblock
@@ -970,8 +972,12 @@ public interface Admin extends AutoCloseable, Closeable {
   /**
    * @return list of stores infos that are considered dead. A store is considered dead if it exists but has no
    * user traffic in it's read or write path.
+   * @param params Parameters for dead store detection including:
+   *               - "includeSystemStores": boolean (default: false)
+   *               - "lookBackMS": long (optional)
+   *               - Future extension points
    */
-  List<StoreInfo> getDeadStores(String clusterName, String storeName, boolean includeSystemStores);
+  List<StoreInfo> getDeadStores(String clusterName, String storeName, Map<String, String> params);
 
   Map<String, RegionPushDetails> listStorePushInfo(
       String clusterName,

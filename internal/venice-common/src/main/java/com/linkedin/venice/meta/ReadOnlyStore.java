@@ -6,11 +6,13 @@ import com.linkedin.venice.exceptions.StoreVersionNotFoundException;
 import com.linkedin.venice.systemstore.schemas.DataRecoveryConfig;
 import com.linkedin.venice.systemstore.schemas.StoreETLConfig;
 import com.linkedin.venice.systemstore.schemas.StoreHybridConfig;
+import com.linkedin.venice.systemstore.schemas.StoreLifecycleHooksRecord;
 import com.linkedin.venice.systemstore.schemas.StorePartitionerConfig;
 import com.linkedin.venice.systemstore.schemas.StoreProperties;
 import com.linkedin.venice.systemstore.schemas.StoreVersion;
 import com.linkedin.venice.systemstore.schemas.StoreViewConfig;
 import com.linkedin.venice.systemstore.schemas.SystemStoreProperties;
+import com.linkedin.venice.utils.CollectionUtils;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -973,6 +975,8 @@ public class ReadOnlyStore implements Store {
     storeProperties.setDaVinciPushStatusStoreEnabled(isDaVinciPushStatusStoreEnabled());
     storeProperties.setActiveActiveReplicationEnabled(isActiveActiveReplicationEnabled());
     // storeProperties.setApplyTargetVersionFilterForIncPush(isApplyTargetVersionFilterForIncPush());
+    storeProperties.setCompactionEnabled(isCompactionEnabled());
+    storeProperties.setCompactionThresholdMilliseconds(getCompactionThresholdMilliseconds());
     storeProperties.setMinCompactionLagSeconds(getMinCompactionLagSeconds());
     storeProperties.setMaxCompactionLagSeconds(getMaxCompactionLagSeconds());
     storeProperties.setMaxRecordSizeBytes(getMaxRecordSizeBytes());
@@ -987,6 +991,7 @@ public class ReadOnlyStore implements Store {
     storeProperties.setTargetSwapRegion(getTargetSwapRegion());
     storeProperties.setTargetSwapRegionWaitTime(getTargetSwapRegionWaitTime());
     storeProperties.setIsDaVinciHeartBeatReported(getIsDavinciHeartbeatReported());
+    storeProperties.setStoreLifecycleHooks(convertStoreLifecycleHooks(getStoreLifecycleHooks()));
 
     return storeProperties;
   }
@@ -1493,6 +1498,26 @@ public class ReadOnlyStore implements Store {
   }
 
   @Override
+  public boolean isCompactionEnabled() {
+    return this.delegate.isCompactionEnabled();
+  }
+
+  @Override
+  public void setCompactionEnabled(boolean compactionEnabled) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public long getCompactionThresholdMilliseconds() {
+    return this.delegate.getCompactionThresholdMilliseconds();
+  }
+
+  @Override
+  public void setCompactionThresholdMilliseconds(long compactionThreshold) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
   public long getMinCompactionLagSeconds() {
     return this.delegate.getMinCompactionLagSeconds();
   }
@@ -1614,6 +1639,36 @@ public class ReadOnlyStore implements Store {
 
   @Override
   public void setGlobalRtDivEnabled(boolean globalRtDivEnabled) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public boolean isTTLRepushEnabled() {
+    return delegate.isTTLRepushEnabled();
+  }
+
+  @Override
+  public void setTTLRepushEnabled(boolean ttlRepushEnabled) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public boolean isEnumSchemaEvolutionAllowed() {
+    return delegate.isEnumSchemaEvolutionAllowed();
+  }
+
+  @Override
+  public void setEnumSchemaEvolutionAllowed(boolean enumSchemaEvolutionAllowed) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public List<LifecycleHooksRecord> getStoreLifecycleHooks() {
+    return delegate.getStoreLifecycleHooks();
+  }
+
+  @Override
+  public void setStoreLifecycleHooks(List<LifecycleHooksRecord> storeLifecycleHooks) {
     throw new UnsupportedOperationException();
   }
 
@@ -1803,5 +1858,22 @@ public class ReadOnlyStore implements Store {
     }
 
     return systemStorePropertiesMap;
+  }
+
+  private static List<StoreLifecycleHooksRecord> convertStoreLifecycleHooks(
+      List<LifecycleHooksRecord> storeLifecycleHooks) {
+    if (storeLifecycleHooks.isEmpty()) {
+      return Collections.emptyList();
+    }
+
+    List<StoreLifecycleHooksRecord> convertedStoreLifecycleHooks = new ArrayList<>();
+    for (LifecycleHooksRecord storeLifecycleHooksRecord: storeLifecycleHooks) {
+      convertedStoreLifecycleHooks.add(
+          new StoreLifecycleHooksRecord(
+              storeLifecycleHooksRecord.getStoreLifecycleHooksClassName(),
+              CollectionUtils
+                  .convertStringMapToCharSequenceMap(storeLifecycleHooksRecord.getStoreLifecycleHooksParams())));
+    }
+    return convertedStoreLifecycleHooks;
   }
 }

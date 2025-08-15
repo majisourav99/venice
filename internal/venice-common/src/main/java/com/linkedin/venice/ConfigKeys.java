@@ -336,6 +336,8 @@ public class ConfigKeys {
    */
   public static final String DEFAULT_READ_STRATEGY = "default.read.strategy";
   public static final String DEFAULT_OFFLINE_PUSH_STRATEGY = "default.offline.push.strategy";
+  public static final String CONCURRENT_PUSH_DETECTION_STRATEGY = "concurrent.push.detection.strategy";
+
   public static final String DEFAULT_ROUTING_STRATEGY = "default.routing.strategy";
   public static final String DEFAULT_REPLICA_FACTOR = "default.replica.factor";
   public static final String DEFAULT_NUMBER_OF_PARTITION = "default.partition.count";
@@ -442,8 +444,7 @@ public class ConfigKeys {
   /**
    * Time since last log compaction before a store is considered for log compaction
    */
-  public static final String TIME_SINCE_LAST_LOG_COMPACTION_THRESHOLD_MS =
-      "log.compaction.time.since.last.compaction.threshold.ms";
+  public static final String LOG_COMPACTION_THRESHOLD_MS = "log.compaction.threshold.ms";
 
   /**
    * This config is to indicate the max retention policy we have setup for deprecated jobs currently and in the past.
@@ -567,10 +568,33 @@ public class ConfigKeys {
   public static final String CONTROLLER_HELIX_CLOUD_INFO_PROCESSOR_NAME = "controller.helix.cloud.info.processor.name";
 
   /**
+   * Controller Helix participant deregistration timeout in milliseconds.
+   */
+  public static final String CONTROLLER_HELIX_PARTICIPANT_DEREGISTRATION_TIMEOUT_MS =
+      "controller.helix.participant.deregistration.timeout.ms";
+
+  /**
    * Base URL for customized health checks triggered by Helix. Default is empty string.
    */
   public static final String CONTROLLER_HELIX_REST_CUSTOMIZED_HEALTH_URL =
       "controller.helix.rest.customized.health.url";
+
+  /**
+   * Config that controls whether server cluster in Helix is TOPOLOGY aware or not.
+   */
+  public static final String CONTROLLER_HELIX_SERVER_CLUSTER_TOPOLOGY_AWARE =
+      "controller.helix.server.cluster.topology.aware";
+
+  /**
+   * The TOPOLOGY string to use for the server cluster in Helix.
+   */
+  public static final String CONTROLLER_HELIX_SERVER_CLUSTER_TOPOLOGY = "controller.helix.server.cluster.topology";
+
+  /**
+   * The FAULT_ZONE_TYPE string to use for the server cluster in Helix.
+   */
+  public static final String CONTROLLER_HELIX_SERVER_CLUSTER_FAULT_ZONE_TYPE =
+      "controller.helix.server.cluster.fault.zone.type";
 
   /**
    * Whether to enable graveyard cleanup for batch-only store at cluster level. Default is false.
@@ -615,12 +639,8 @@ public class ConfigKeys {
   public static final String CONTROLLER_PARENT_SYSTEM_STORE_HEARTBEAT_CHECK_WAIT_TIME_SECONDS =
       "controller.parent.system.store.heartbeat.check.wait.time.seconds";
 
-  /**
-   * The maximum retry count for parent controller to fix a bad system store.
-   * Default is 1.
-   */
-  public static final String CONTROLLER_PARENT_SYSTEM_STORE_REPAIR_RETRY_COUNT =
-      "controller.parent.system.store.repair.retry.count";
+  public static final String CONTROLLER_PARENT_SYSTEM_STORE_VERSION_REFRESH_THRESHOLD_IN_DAYS =
+      "controller.parent.system.store.version.refresh.threshold.in.days";
 
   /**
    * Whether to initialize system schemas when controller starts. Default is true.
@@ -1069,12 +1089,6 @@ public class ConfigKeys {
    */
   public static final String FREEZE_INGESTION_IF_READY_TO_SERVE_OR_LOCAL_DATA_EXISTS =
       "freeze.ingestion.if.ready.to.serve.or.local.data.exists";
-
-  /**
-   * a comma seperated list of kafka producer metrics that will be reported.
-   * For ex. "outgoing-byte-rate,record-send-rate,batch-size-max,batch-size-avg,buffer-available-bytes,buffer-exhausted-rate"
-   */
-  public static final String KAFKA_PRODUCER_METRICS = "list.of.producer.metrics.from.kafka";
 
   /**
    * Whether to print logs that are used for troubleshooting only.
@@ -1634,6 +1648,12 @@ public class ConfigKeys {
    * The name of the cluster that the internal store for storing push job details records belongs to.
    */
   public static final String PUSH_JOB_STATUS_STORE_CLUSTER_NAME = "controller.push.job.status.store.cluster.name";
+
+  /**
+   * The name of the cluster that the internal store for storing controller parent metadata belongs to.
+   */
+  public static final String PARENT_CONTROLLER_METADATA_STORE_CLUSTER_NAME =
+      "parent.controller.metadata.store.cluster.name";
 
   /**
    * The most-significant-bits of the producer GUID used by {@code VenicePushJob} encoded as a {@code long}.
@@ -2542,6 +2562,16 @@ public class ConfigKeys {
    * retry managers in router periodically to provide retry budget based on a percentage of the original requests.
    */
   public static final String ROUTER_RETRY_MANAGER_CORE_POOL_SIZE = "router.retry.manager.core.pool.size";
+
+  /**
+   * Whether to enable concurrent routing within one multi-key request in Router.
+   */
+  public static final String ROUTER_ROUTING_COMPUTATION_MODE = "router.routing.computation.mode";
+  public static final String ROUTER_PARALLEL_ROUTING_THREAD_POOL_SIZE = "router.parallel.routing.thread.pool.size";
+  /**
+   * Chunk size (number of partitions) for parallel routing within one multi-key request in Router.
+   */
+  public static final String ROUTER_PARALLEL_ROUTING_CHUNK_SIZE = "router.parallel.routing.chunk.size";
 
   /**
    * Server configs to enable the topic partition re-subscription during ingestion to let bottom ingestion service aware

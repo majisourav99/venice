@@ -30,6 +30,7 @@ import static com.linkedin.venice.controllerapi.ControllerApiConstants.KAFKA_TOP
 import static com.linkedin.venice.controllerapi.ControllerApiConstants.KAFKA_TOPIC_MIN_IN_SYNC_REPLICA;
 import static com.linkedin.venice.controllerapi.ControllerApiConstants.KAFKA_TOPIC_RETENTION_IN_MS;
 import static com.linkedin.venice.controllerapi.ControllerApiConstants.KEY_SCHEMA;
+import static com.linkedin.venice.controllerapi.ControllerApiConstants.LOOK_BACK_MS;
 import static com.linkedin.venice.controllerapi.ControllerApiConstants.NAME;
 import static com.linkedin.venice.controllerapi.ControllerApiConstants.OFFSET;
 import static com.linkedin.venice.controllerapi.ControllerApiConstants.OPERATION;
@@ -104,6 +105,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -245,7 +247,7 @@ public class ControllerClient implements Closeable {
 
   public StoreResponse getStore(String storeName, int timeoutMs) {
     QueryParams params = newParams().add(NAME, storeName);
-    return request(ControllerRoute.STORE, params, StoreResponse.class, timeoutMs, 1, null, Optional.empty());
+    return request(ControllerRoute.STORE, params, StoreResponse.class, timeoutMs, 1, null, null);
   }
 
   public RepushInfoResponse getRepushInfo(String storeName, Optional<String> fabricName) {
@@ -857,7 +859,7 @@ public class ControllerClient implements Closeable {
     if (StringUtils.isNotEmpty(targetedRegions)) {
       params.add(TARGETED_REGIONS, targetedRegions);
     }
-    return request(ControllerRoute.JOB, params, JobStatusQueryResponse.class, timeoutMs, 1, null, Optional.empty());
+    return request(ControllerRoute.JOB, params, JobStatusQueryResponse.class, timeoutMs, 1, null, null);
   }
 
   /**
@@ -869,14 +871,7 @@ public class ControllerClient implements Closeable {
     String storeName = Version.parseStoreFromKafkaTopicName(kafkaTopic);
     int version = Version.parseVersionFromKafkaTopicName(kafkaTopic);
     QueryParams params = newParams().add(NAME, storeName).add(VERSION, version).add(FABRIC, region);
-    return request(
-        ControllerRoute.JOB,
-        params,
-        JobStatusQueryResponse.class,
-        QUERY_JOB_STATUS_TIMEOUT,
-        1,
-        null,
-        Optional.empty());
+    return request(ControllerRoute.JOB, params, JobStatusQueryResponse.class, QUERY_JOB_STATUS_TIMEOUT, 1, null, null);
   }
 
   public ControllerResponse sendPushJobDetails(String storeName, int version, byte[] pushJobDetails) {
@@ -1260,11 +1255,27 @@ public class ControllerClient implements Closeable {
 
   public MultiStoreInfoResponse getDeadStores(
       String clusterName,
-      boolean includeSystemStores,
-      Optional<String> storeName) {
-    QueryParams params = newParams().add(CLUSTER, clusterName).add(INCLUDE_SYSTEM_STORES, includeSystemStores);
-    storeName.ifPresent(s -> params.add(NAME, s));
-    return request(ControllerRoute.GET_DEAD_STORES, params, MultiStoreInfoResponse.class);
+      Optional<String> storeName,
+      Map<String, String> params) {
+    QueryParams queryParams = newParams().add(CLUSTER, clusterName);
+
+    // Add storeName if present
+    storeName.ifPresent(s -> queryParams.add(NAME, s));
+
+    // Add all parameters from the map including includeSystemStores
+    for (Map.Entry<String, String> entry: params.entrySet()) {
+      String key = entry.getKey();
+      String value = entry.getValue();
+
+      // Map our internal param names to the API constants
+      if ("includeSystemStores".equals(key)) {
+        queryParams.add(INCLUDE_SYSTEM_STORES, value);
+      } else if ("lookBackMS".equals(key)) {
+        queryParams.add(LOOK_BACK_MS, value);
+      }
+    }
+
+    return request(ControllerRoute.GET_DEAD_STORES, queryParams, MultiStoreInfoResponse.class);
   }
 
   public VersionResponse getStoreLargestUsedVersion(String clusterName, String storeName) {
@@ -1469,7 +1480,7 @@ public class ControllerClient implements Closeable {
         DEFAULT_REQUEST_TIMEOUT_MS,
         DEFAULT_MAX_ATTEMPTS,
         null,
-        Optional.of(controllerUrl));
+        controllerUrl);
   }
 
   public ControllerResponse deleteKafkaTopic(String topicName) {
@@ -1542,14 +1553,7 @@ public class ControllerClient implements Closeable {
   }
 
   private <T extends ControllerResponse> T request(ControllerRoute route, QueryParams params, Class<T> responseType) {
-    return request(
-        route,
-        params,
-        responseType,
-        DEFAULT_REQUEST_TIMEOUT_MS,
-        DEFAULT_MAX_ATTEMPTS,
-        null,
-        Optional.empty());
+    return request(route, params, responseType, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_MAX_ATTEMPTS, null, null);
   }
 
   private <T extends ControllerResponse> T request(
@@ -1557,14 +1561,7 @@ public class ControllerClient implements Closeable {
       QueryParams params,
       Class<T> responseType,
       byte[] data) {
-    return request(
-        route,
-        params,
-        responseType,
-        DEFAULT_REQUEST_TIMEOUT_MS,
-        DEFAULT_MAX_ATTEMPTS,
-        data,
-        Optional.empty());
+    return request(route, params, responseType, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_MAX_ATTEMPTS, data, null);
   }
 
   /**
@@ -1585,16 +1582,22 @@ public class ControllerClient implements Closeable {
       int timeoutMs,
       int maxAttempts,
       byte[] data,
-      Optional<String> controllerUrl) {
+      String controllerUrl) {
     Exception lastException = null;
     boolean logErrorMessage = true;
-    try (ControllerTransport transport = new ControllerTransport(sslFactory)) {
+    boolean requireLeaderDiscovery = controllerUrl == null || controllerUrl.isEmpty();
+    try (ControllerTransport transport = getNewControllerTransport()) {
       for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
         try {
           // If the controllerUrl is not provided, use the leader controller URL.
           // This option is useful when we want to forward request to specific controller (e.g. to standby controller)
-          return transport
-              .request(controllerUrl.orElse(getLeaderControllerUrl()), route, params, responseType, timeoutMs, data);
+          return transport.request(
+              requireLeaderDiscovery ? getLeaderControllerUrl() : controllerUrl,
+              route,
+              params,
+              responseType,
+              timeoutMs,
+              data);
         } catch (ExecutionException | TimeoutException e) {
           // Controller is unreachable. Let's wait for a new leader to be elected.
           // Total wait time should be at least leader election time (~30 seconds)
@@ -1618,7 +1621,7 @@ public class ControllerClient implements Closeable {
               "Retrying controller request, attempt = {}/{}, controller = {}, route = {}, params = {}, timeout = {}",
               attempt,
               maxAttempts,
-              controllerUrl.orElse(this.leaderControllerUrl),
+              (requireLeaderDiscovery ? this.leaderControllerUrl : controllerUrl),
               route.getPath(),
               params.getNameValuePairs(),
               timeoutMs,
@@ -1631,8 +1634,8 @@ public class ControllerClient implements Closeable {
     }
 
     String message = "An error occurred during controller request." + " controller = "
-        + controllerUrl.orElse(this.leaderControllerUrl) + ", route = " + route.getPath() + ", params = "
-        + params.getAbbreviatedNameValuePairs() + ", timeout = " + timeoutMs;
+        + (requireLeaderDiscovery ? this.leaderControllerUrl : controllerUrl) + ", route = " + route.getPath()
+        + ", params = " + params.getAbbreviatedNameValuePairs() + ", timeout = " + timeoutMs;
     return makeErrorResponse(message, lastException, responseType, logErrorMessage);
   }
 
@@ -1672,5 +1675,10 @@ public class ControllerClient implements Closeable {
 
   public Collection<String> getControllerDiscoveryUrls() {
     return this.controllerDiscoveryUrls;
+  }
+
+  // For testing only
+  public ControllerTransport getNewControllerTransport() {
+    return new ControllerTransport(sslFactory);
   }
 }

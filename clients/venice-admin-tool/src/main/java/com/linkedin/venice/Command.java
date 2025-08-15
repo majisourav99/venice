@@ -22,6 +22,7 @@ import static com.linkedin.venice.Arg.CLUSTER;
 import static com.linkedin.venice.Arg.CLUSTER_DEST;
 import static com.linkedin.venice.Arg.CLUSTER_LIST;
 import static com.linkedin.venice.Arg.CLUSTER_SRC;
+import static com.linkedin.venice.Arg.COMPACTION_THRESHOLD_MILLISECONDS;
 import static com.linkedin.venice.Arg.COMPRESSION_STRATEGY;
 import static com.linkedin.venice.Arg.DATETIME;
 import static com.linkedin.venice.Arg.DAVINCI_HEARTBEAT_REPORTED;
@@ -33,9 +34,11 @@ import static com.linkedin.venice.Arg.DEST_ZK_SSL_CONFIG_FILE;
 import static com.linkedin.venice.Arg.DEST_ZOOKEEPER_URL;
 import static com.linkedin.venice.Arg.DISABLE_DAVINCI_PUSH_STATUS_STORE;
 import static com.linkedin.venice.Arg.DISABLE_META_STORE;
+import static com.linkedin.venice.Arg.ENABLE_COMPACTION;
 import static com.linkedin.venice.Arg.ENABLE_DISABLED_REPLICA;
 import static com.linkedin.venice.Arg.ENABLE_STORE_MIGRATION;
 import static com.linkedin.venice.Arg.END_DATE;
+import static com.linkedin.venice.Arg.ENUM_SCHEMA_EVOLUTION_ALLOWED;
 import static com.linkedin.venice.Arg.ETLED_PROXY_USER_ACCOUNT;
 import static com.linkedin.venice.Arg.EXECUTION;
 import static com.linkedin.venice.Arg.EXPECTED_ROUTER_COUNT;
@@ -74,6 +77,7 @@ import static com.linkedin.venice.Arg.LAG_FILTER_ENABLED;
 import static com.linkedin.venice.Arg.LARGEST_USED_RT_VERSION_NUMBER;
 import static com.linkedin.venice.Arg.LARGEST_USED_VERSION_NUMBER;
 import static com.linkedin.venice.Arg.LATEST_SUPERSET_SCHEMA_ID;
+import static com.linkedin.venice.Arg.LOOK_BACK_MS;
 import static com.linkedin.venice.Arg.MAX_COMPACTION_LAG_SECONDS;
 import static com.linkedin.venice.Arg.MAX_NEARLINE_RECORD_SIZE_BYTES;
 import static com.linkedin.venice.Arg.MAX_RECORD_SIZE_BYTES;
@@ -128,6 +132,7 @@ import static com.linkedin.venice.Arg.STORAGE_QUOTA;
 import static com.linkedin.venice.Arg.STORE;
 import static com.linkedin.venice.Arg.STORES;
 import static com.linkedin.venice.Arg.STORE_FILTER_FILE;
+import static com.linkedin.venice.Arg.STORE_LIFECYCLE_HOOKS_LIST;
 import static com.linkedin.venice.Arg.STORE_SIZE;
 import static com.linkedin.venice.Arg.STORE_TYPE;
 import static com.linkedin.venice.Arg.STORE_VIEW_CONFIGS;
@@ -299,11 +304,12 @@ public enum Command {
           FUTURE_VERSION_ETL_ENABLED, ETLED_PROXY_USER_ACCOUNT, NATIVE_REPLICATION_ENABLED, PUSH_STREAM_SOURCE_ADDRESS,
           BACKUP_VERSION_RETENTION_DAY, REPLICATION_FACTOR, NATIVE_REPLICATION_SOURCE_FABRIC, REPLICATE_ALL_CONFIGS,
           ACTIVE_ACTIVE_REPLICATION_ENABLED, REGIONS_FILTER, DISABLE_META_STORE, DISABLE_DAVINCI_PUSH_STATUS_STORE,
-          STORAGE_PERSONA, STORE_VIEW_CONFIGS, LATEST_SUPERSET_SCHEMA_ID, MIN_COMPACTION_LAG_SECONDS,
-          MAX_COMPACTION_LAG_SECONDS, MAX_RECORD_SIZE_BYTES, MAX_NEARLINE_RECORD_SIZE_BYTES,
-          UNUSED_SCHEMA_DELETION_ENABLED, BLOB_TRANSFER_ENABLED, SEPARATE_REALTIME_TOPIC_ENABLED,
-          NEARLINE_PRODUCER_COMPRESSION_ENABLED, NEARLINE_PRODUCER_COUNT_PER_WRITER, TARGET_SWAP_REGION,
-          TARGET_SWAP_REGION_WAIT_TIME, DAVINCI_HEARTBEAT_REPORTED, ENABLE_STORE_MIGRATION, GLOBAL_RT_DIV_ENABLED }
+          STORAGE_PERSONA, STORE_VIEW_CONFIGS, LATEST_SUPERSET_SCHEMA_ID, ENABLE_COMPACTION,
+          COMPACTION_THRESHOLD_MILLISECONDS, MIN_COMPACTION_LAG_SECONDS, MAX_COMPACTION_LAG_SECONDS,
+          MAX_RECORD_SIZE_BYTES, MAX_NEARLINE_RECORD_SIZE_BYTES, UNUSED_SCHEMA_DELETION_ENABLED, BLOB_TRANSFER_ENABLED,
+          SEPARATE_REALTIME_TOPIC_ENABLED, NEARLINE_PRODUCER_COMPRESSION_ENABLED, NEARLINE_PRODUCER_COUNT_PER_WRITER,
+          TARGET_SWAP_REGION, TARGET_SWAP_REGION_WAIT_TIME, DAVINCI_HEARTBEAT_REPORTED, ENABLE_STORE_MIGRATION,
+          GLOBAL_RT_DIV_ENABLED, ENUM_SCHEMA_EVOLUTION_ALLOWED, STORE_LIFECYCLE_HOOKS_LIST }
   ),
   UPDATE_CLUSTER_CONFIG(
       "update-cluster-config", "Update live cluster configs", new Arg[] { URL, CLUSTER },
@@ -476,7 +482,7 @@ public enum Command {
   ),
   GET_DEAD_STORES(
       "get-dead-stores", "Get the stores that are considered dead via ACL DB and Store Discovery",
-      new Arg[] { URL, CLUSTER }, new Arg[] { STORE, INCLUDE_SYSTEM_STORES }
+      new Arg[] { URL, CLUSTER }, new Arg[] { STORE, INCLUDE_SYSTEM_STORES, LOOK_BACK_MS }
   ),
   LIST_STORE_PUSH_INFO(
       "list-store-push-info", "List information about current pushes and push history for a specific store.",

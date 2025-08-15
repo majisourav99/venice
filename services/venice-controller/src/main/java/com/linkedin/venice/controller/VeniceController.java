@@ -242,6 +242,7 @@ public class VeniceController {
     Admin admin = controllerService.getVeniceHelixAdmin();
 
     if (multiClusterConfigs.isParent()) {
+      // TODO: Remove the following once ConcurrentPushDetectionStrategy.PARENT_VERSION_STATUS_ONLY is fully rolled out
       return new TopicCleanupServiceForParentController(
           admin,
           multiClusterConfigs,
@@ -530,6 +531,7 @@ public class VeniceController {
         new VeniceControllerContext.Builder().setPropertiesList(Collections.singletonList(controllerProps))
             .setServiceDiscoveryAnnouncers(new ArrayList<>())
             .setD2Clients(d2Clients)
+            .setD2Client(d2Client)
             .build());
     controller.start();
     addShutdownHook(controller, zkAddress);
@@ -564,10 +566,6 @@ public class VeniceController {
 
   VeniceGrpcServer getAdminGrpcServer() {
     return adminGrpcServer;
-  }
-
-  TopicCleanupService getTopicCleanupService() {
-    return topicCleanupService;
   }
 
   Optional<StoreBackupVersionCleanupService> getStoreBackupVersionCleanupService() {
