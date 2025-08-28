@@ -22,7 +22,6 @@ import static com.linkedin.davinci.stats.IngestionStats.NEARLINE_LOCAL_BROKER_TO
 import static com.linkedin.davinci.stats.IngestionStats.NEARLINE_PRODUCER_TO_LOCAL_BROKER_LATENCY;
 import static com.linkedin.davinci.stats.IngestionStats.OFFSET_REGRESSION_DCR_ERROR;
 import static com.linkedin.davinci.stats.IngestionStats.PRODUCER_CALLBACK_LATENCY;
-import static com.linkedin.davinci.stats.IngestionStats.READY_TO_SERVE_WITH_RT_LAG_METRIC_NAME;
 import static com.linkedin.davinci.stats.IngestionStats.RECORDS_CONSUMED_METRIC_NAME;
 import static com.linkedin.davinci.stats.IngestionStats.STORAGE_QUOTA_USED;
 import static com.linkedin.davinci.stats.IngestionStats.SUBSCRIBE_ACTION_PREP_LATENCY;
@@ -31,7 +30,6 @@ import static com.linkedin.davinci.stats.IngestionStats.TOMBSTONE_CREATION_DCR;
 import static com.linkedin.davinci.stats.IngestionStats.TOTAL_DCR;
 import static com.linkedin.davinci.stats.IngestionStats.TOTAL_DUPLICATE_KEY_UPDATE_COUNT;
 import static com.linkedin.davinci.stats.IngestionStats.UPDATE_IGNORED_DCR;
-import static com.linkedin.davinci.stats.IngestionStats.VERSION_TOPIC_END_OFFSET_REWIND_COUNT;
 import static com.linkedin.davinci.stats.IngestionStats.WRITE_COMPUTE_OPERATION_FAILURE;
 import static com.linkedin.venice.stats.StatsErrorCode.NULL_INGESTION_STATS;
 
@@ -78,13 +76,6 @@ public class IngestionStatsReporter extends AbstractVeniceStatsReporter<Ingestio
             WRITE_COMPUTE_OPERATION_FAILURE));
 
     registerSensor(new IngestionStatsGauge(this, () -> getStats().getStorageQuotaUsed(), 0, STORAGE_QUOTA_USED));
-
-    registerSensor(
-        new IngestionStatsGauge(
-            this,
-            () -> getStats().getVersionTopicEndOffsetRewindCount(),
-            0,
-            VERSION_TOPIC_END_OFFSET_REWIND_COUNT));
 
     registerSensor(
         new IngestionStatsGauge(this, () -> getStats().getRecordsConsumed(), 0, RECORDS_CONSUMED_METRIC_NAME));
@@ -240,13 +231,6 @@ public class IngestionStatsReporter extends AbstractVeniceStatsReporter<Ingestio
   // Only register these stats if the store is hybrid.
   @Override
   protected void registerConditionalStats() {
-    registerSensor(
-        new IngestionStatsGauge(
-            this,
-            () -> getStats().getReadyToServeWithRTLag(),
-            0,
-            READY_TO_SERVE_WITH_RT_LAG_METRIC_NAME));
-
     if (!VeniceSystemStoreUtils.isSystemStore(storeName)) {
       registerSensor(
           new IngestionStatsGauge(

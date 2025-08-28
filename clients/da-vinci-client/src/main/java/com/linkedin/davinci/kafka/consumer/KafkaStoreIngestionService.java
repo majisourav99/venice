@@ -98,12 +98,10 @@ import com.linkedin.venice.utils.pools.LandFillObjectPool;
 import com.linkedin.venice.writer.VeniceWriterFactory;
 import io.tehuti.metrics.MetricsRepository;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Optional;
@@ -172,6 +170,8 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
   private final StoreIngestionTaskFactory ingestionTaskFactory;
 
   private final boolean isIsolatedIngestion;
+
+  private final boolean isDaVinciClient;
 
   private final TopicManagerRepository topicManagerRepository;
 
@@ -248,6 +248,7 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
     this.topicNameToIngestionTaskMap = new ConcurrentSkipListMap<>();
     this.veniceConfigLoader = veniceConfigLoader;
     this.isIsolatedIngestion = isIsolatedIngestion;
+    this.isDaVinciClient = isDaVinciClient;
     this.partitionStateSerializer = partitionStateSerializer;
     this.compressorFactory = compressorFactory;
     this.zkHelixAdmin = zkHelixAdmin;
@@ -512,8 +513,6 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
         .setMetaStoreWriter(metaStoreWriter)
         .setCompressorFactory(compressorFactory)
         .setVeniceViewWriterFactory(viewWriterFactory)
-        .setRunnableForKillIngestionTasksForNonCurrentVersions(
-            serverConfig.getIngestionMemoryLimit() > 0 ? () -> killConsumptionTaskForNonCurrentVersions() : null)
         .setHeartbeatMonitoringService(heartbeatMonitoringService)
         .setAAWCWorkLoadProcessingThreadPool(aaWCWorkLoadProcessingThreadPool)
         .setAAWCIngestionStorageLookupThreadPool(aaWCIngestionStorageLookupThreadPool)
@@ -1061,33 +1060,6 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
     }
   }
 
-  /**
-   * This function will try to kill the ingestion tasks belonging to non-current versions.
-   * And this is mainly being used by memory limiter feature to free up resources when encountering memory
-   * exhausting issue.
-   *
-   */
-  private void killConsumptionTaskForNonCurrentVersions() {
-    // Find out all non-current versions
-    Set<String> topicNameSet = topicNameToIngestionTaskMap.keySet();
-    List<String> nonCurrentVersions = new ArrayList<>();
-    topicNameSet.forEach(topic -> {
-      String storeName = Version.parseStoreFromKafkaTopicName(topic);
-      int version = Version.parseVersionFromKafkaTopicName(topic);
-      Store store = metadataRepo.getStore(storeName);
-      if (store == null || version != store.getCurrentVersion()) {
-        nonCurrentVersions.add(topic);
-      }
-    });
-    if (nonCurrentVersions.isEmpty()) {
-      LOGGER.info("No ingestion task belonging to non-current version");
-      return;
-    }
-    LOGGER.info("Start killing the following ingestion tasks: {}", nonCurrentVersions);
-    nonCurrentVersions.forEach(topic -> killConsumptionTask(topic));
-    LOGGER.info("Finished killing the following ingestion tasks: {}", nonCurrentVersions);
-  }
-
   private void scanAndCloseIdleConsumptionTasks() {
     try {
       int numberOfTasksBeforeCleaning = topicNameToIngestionTaskMap.size();
@@ -1322,6 +1294,10 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
 
   public StoreIngestionTask getStoreIngestionTask(String topicName) {
     return topicNameToIngestionTaskMap.get(topicName);
+  }
+
+  public boolean isDaVinciClient() {
+    return this.isDaVinciClient;
   }
 
   public AdminResponse getConsumptionSnapshots(String topicName, ComplementSet<Integer> partitions) {

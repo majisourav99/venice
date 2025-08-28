@@ -1,6 +1,5 @@
 package com.linkedin.davinci.client;
 
-import static com.linkedin.davinci.ingestion.utils.IsolatedIngestionUtils.INGESTION_ISOLATION_CONFIG_PREFIX;
 import static com.linkedin.davinci.storage.chunking.AbstractAvroChunkingAdapter.DO_NOT_USE_READER_SCHEMA_ID;
 import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.RECORD_TRANSFORMER_VALUE_SCHEMA;
 import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_LEVEL0_FILE_NUM_COMPACTION_TRIGGER;
@@ -12,7 +11,6 @@ import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_LEV
 import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_PLAIN_TABLE_FORMAT_ENABLED;
 import static com.linkedin.venice.ConfigKeys.CLUSTER_NAME;
 import static com.linkedin.venice.ConfigKeys.DA_VINCI_SUBSCRIBE_ON_DISK_PARTITIONS_AUTOMATICALLY;
-import static com.linkedin.venice.ConfigKeys.INGESTION_MEMORY_LIMIT;
 import static com.linkedin.venice.ConfigKeys.INGESTION_USE_DA_VINCI_CLIENT;
 import static com.linkedin.venice.ConfigKeys.KAFKA_BOOTSTRAP_SERVERS;
 import static com.linkedin.venice.ConfigKeys.ZOOKEEPER_ADDRESS;
@@ -141,6 +139,7 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
 
   private final DaVinciRecordTransformerConfig recordTransformerConfig;
   private int readerSchemaId;
+  private boolean isValidateSpecificSchemaEnabled;
 
   public AvroGenericDaVinciClient(
       DaVinciConfig daVinciConfig,
@@ -727,7 +726,6 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
         .put(INGESTION_USE_DA_VINCI_CLIENT, true)
         .put(RECORD_TRANSFORMER_VALUE_SCHEMA, recordTransformerOutputValueSchema)
         // Explicitly disable memory limiter in Isolated Process
-        .put(INGESTION_ISOLATION_CONFIG_PREFIX + "." + INGESTION_MEMORY_LIMIT, -1)
         .put(backendConfig.toProperties())
         .build();
     logger.info("backendConfig=" + config.toString(true));
@@ -783,7 +781,7 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
     }
     logger.info("Starting client, storeName={}", getStoreName());
     VeniceConfigLoader configLoader = buildVeniceConfig();
-
+    this.isValidateSpecificSchemaEnabled = configLoader.getVeniceServerConfig().isValidateSpecificSchemaEnabled();
     Optional<ObjectCacheConfig> cacheConfig = Optional.ofNullable(daVinciConfig.getCacheConfig());
     initBackend(clientConfig, configLoader, managedClients, icProvider, cacheConfig);
 
@@ -828,9 +826,16 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
               .getSchemaRepository()
               .getValueSchemaId(getStoreName(), specificValueSchema.toString());
           if (schemaId <= 0) {
-            throw new VeniceClientException(
-                "Cannot find the specific value class: " + clientConfig.getSpecificValueClass()
-                    + " in schema repository, returned schema Id: " + schemaId);
+            if (isValidateSpecificSchemaEnabled) {
+              throw new VeniceClientException(
+                  "For store: " + getStoreName() + ", cannot find the specific value class: "
+                      + clientConfig.getSpecificValueClass() + " with schema: " + specificValueSchema);
+            } else {
+              logger.warn(
+                  "For store: " + getStoreName() + ", cannot find the specific value class: "
+                      + clientConfig.getSpecificValueClass() + " with schema: " + specificValueSchema);
+              schemaId = DO_NOT_USE_READER_SCHEMA_ID;
+            }
           }
         }
         this.readerSchemaId = schemaId;

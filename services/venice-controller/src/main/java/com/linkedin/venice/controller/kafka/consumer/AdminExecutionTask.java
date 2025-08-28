@@ -56,6 +56,7 @@ import com.linkedin.venice.meta.VeniceUserStoreType;
 import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.schema.SchemaEntry;
 import com.linkedin.venice.utils.CollectionUtils;
+import com.linkedin.venice.utils.ConfigCommonUtils.ActivationState;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -149,7 +150,7 @@ public class AdminExecutionTask implements Callable<Void> {
       // The queue with the problematic operation will be delegated and retried by the worker thread in the next cycle.
       AdminOperationWrapper adminOperationWrapper = internalTopic.peek();
       String logMessage =
-          "when processing admin message for store " + storeName + " with offset " + adminOperationWrapper.getOffset()
+          "when processing admin message for store " + storeName + " with offset " + adminOperationWrapper.getPosition()
               + " and execution id " + adminOperationWrapper.getAdminOperation().executionId;
       if (e instanceof VeniceRetriableException) {
         // These retriable exceptions are expected, therefore logging at the info level should be sufficient.
@@ -503,6 +504,10 @@ public class AdminExecutionTask implements Callable<Void> {
         .setMigrationDuplicateStore(message.migrationDuplicateStore)
         .setLatestSupersetSchemaId(message.latestSuperSetValueSchemaId)
         .setBlobTransferEnabled(message.blobTransferEnabled)
+        .setBlobTransferInServerEnabled(
+            message.blobTransferInServerEnabled == null
+                ? ActivationState.NOT_SPECIFIED
+                : ActivationState.valueOf(message.blobTransferInServerEnabled.toString()))
         .setUnusedSchemaDeletionEnabled(message.unusedSchemaDeletionEnabled)
         .setNearlineProducerCompressionEnabled(message.nearlineProducerCompressionEnabled)
         .setNearlineProducerCountPerWriter(message.nearlineProducerCountPerWriter)

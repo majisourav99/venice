@@ -23,6 +23,8 @@ import com.linkedin.venice.kafka.validation.Segment;
 import com.linkedin.venice.kafka.validation.checksum.CheckSumType;
 import com.linkedin.venice.offsets.OffsetRecord;
 import com.linkedin.venice.pubsub.api.DefaultPubSubMessage;
+import com.linkedin.venice.pubsub.api.PubSubPosition;
+import com.linkedin.venice.pubsub.api.PubSubSymbolicPosition;
 import com.linkedin.venice.utils.ByteUtils;
 import com.linkedin.venice.utils.CollectionUtils;
 import com.linkedin.venice.utils.LatencyUtils;
@@ -37,7 +39,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.LogManager;
@@ -75,17 +77,18 @@ public class PartitionTracker {
   private final int partition;
   // TODO: clear vtSegments
   /**
-   * There should only be one {@link ConsumptionTask} for VT, so there shouldn't need to be any locking.
+   * There should only be one {@code ConsumptionTask} for VT, so there shouldn't need to be any locking.
    */
   private final VeniceConcurrentHashMap<GUID, Segment> vtSegments = new VeniceConcurrentHashMap<>();
   /**
    * The equivalent for RT is not stored. It's the instantaneous offset when a DIV sync is triggered.
    */
-  private final AtomicLong latestConsumedVtOffset = new AtomicLong(0L);
+  private final AtomicReference<PubSubPosition> latestConsumedVtPosition =
+      new AtomicReference(PubSubSymbolicPosition.EARLIEST);
 
   /**
    * rtSegments is a map of source broker URL to a map of GUID to Segment.
-   * There should only be one {@link ConsumptionTask} for each broker URL, so there shouldn't need to be any locking.
+   * There should only be one {@code ConsumptionTask} for each broker URL, so there shouldn't need to be any locking.
    *
    * TODO: Refactor this so the {@link #rtSegments} map is keyed by region ID (numeric), rather than URL. URLs could
    *       change over time but the ID should remain fixed. It is also more compact (and the outer collection could even
@@ -104,12 +107,12 @@ public class PartitionTracker {
     return partition;
   }
 
-  public long getLatestConsumedVtOffset() {
-    return latestConsumedVtOffset.get();
+  public PubSubPosition getLatestConsumedVtPosition() {
+    return latestConsumedVtPosition.get();
   }
 
-  public void updateLatestConsumedVtOffset(long offset) {
-    latestConsumedVtOffset.updateAndGet(current -> offset);
+  public void updateLatestConsumedVtPosition(PubSubPosition vtPosition) {
+    latestConsumedVtPosition.updateAndGet(current -> vtPosition);
   }
 
   public final String toString() {
@@ -198,7 +201,7 @@ public class PartitionTracker {
     for (Map.Entry<GUID, Segment> entry: vtSegments.entrySet()) {
       destProducerTracker.setSegment(PartitionTracker.VERSION_TOPIC, entry.getKey(), new Segment(entry.getValue()));
     }
-    destProducerTracker.updateLatestConsumedVtOffset(latestConsumedVtOffset.get());
+    destProducerTracker.updateLatestConsumedVtPosition(latestConsumedVtPosition.get());
   }
 
   /**
@@ -226,7 +229,7 @@ public class PartitionTracker {
     ProducerPartitionState state;
     if (TopicType.isVersionTopic(type)) {
       state = offsetRecord.getProducerPartitionState(guid);
-      offsetRecord.setLatestConsumedVtOffset(getLatestConsumedVtOffset());
+      offsetRecord.setLatestConsumedVtPosition(getLatestConsumedVtPosition());
     } else {
       state = offsetRecord.getRealTimeProducerState(type.getKafkaUrl(), guid);
     }
@@ -305,7 +308,7 @@ public class PartitionTracker {
     trackSequenceNumber(segment, consumerRecord, endOfPushReceived, tolerateMissingMsgs, hasPreviousSegment);
     // This is the last step, because we want failures in the previous steps to short-circuit execution.
     trackCheckSum(segment, consumerRecord, endOfPushReceived, tolerateMissingMsgs);
-    segment.setLastSuccessfulOffset(consumerRecord.getPosition().getNumericOffset());
+    segment.setLastSuccessfulPosition(consumerRecord.getPosition());
     segment.setNewSegment(false);
   }
 
@@ -875,7 +878,7 @@ public class PartitionTracker {
 
       sb.append("; partition: ").append(consumerRecord.getTopicPartition().getPartitionNumber());
       if (segment != null) {
-        sb.append("; previous successful offset (in same segment): ").append(segment.getLastSuccessfulOffset());
+        sb.append("; previous successful position (in same segment): ").append(segment.getLastSuccessfulPosition());
       }
       sb.append("; incoming offset: ")
           .append(consumerRecord.getPosition())
@@ -897,7 +900,7 @@ public class PartitionTracker {
           .append(new Date(producerMetadata.messageTimestamp))
           .append(")");
       if (consumerRecord.getValue().leaderMetadataFooter != null) {
-        sb.append("; LeaderMetadata { upstream offset: ")
+        sb.append("; LeaderMetadata { upstream position: ")
             .append(consumerRecord.getValue().leaderMetadataFooter.upstreamOffset)
             .append("; upstream pub sub cluster ID: ")
             .append(consumerRecord.getValue().leaderMetadataFooter.upstreamKafkaClusterId)

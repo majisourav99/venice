@@ -19,6 +19,7 @@ import com.linkedin.venice.meta.Store;
 import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.offsets.OffsetRecord;
 import com.linkedin.venice.store.rocksdb.RocksDBUtils;
+import com.linkedin.venice.utils.ConfigCommonUtils;
 import com.linkedin.venice.utils.IntegrationTestPushUtils;
 import com.linkedin.venice.utils.TestUtils;
 import com.linkedin.venice.utils.TestWriteUtils;
@@ -65,7 +66,8 @@ public class BlobP2PTransferAmongServersTest {
     cluster = initializeVeniceCluster();
 
     String storeName = "test-store";
-    Consumer<UpdateStoreQueryParams> paramsConsumer = params -> params.setBlobTransferEnabled(true);
+    Consumer<UpdateStoreQueryParams> paramsConsumer =
+        params -> params.setBlobTransferInServerEnabled(ConfigCommonUtils.ActivationState.ENABLED);
     setUpBatchStore(cluster, storeName, paramsConsumer, properties -> {}, true);
 
     VeniceServerWrapper server1 = cluster.getVeniceServerByPort(server1Port);
@@ -120,7 +122,9 @@ public class BlobP2PTransferAmongServersTest {
             server1.getVeniceServer().getStorageMetadataService().getLastOffset("test-store_v1", partitionId);
         OffsetRecord offsetServer2 =
             server2.getVeniceServer().getStorageMetadataService().getLastOffset("test-store_v1", partitionId);
-        Assert.assertEquals(offsetServer1.getLocalVersionTopicOffset(), offsetServer2.getLocalVersionTopicOffset());
+        Assert.assertEquals(
+            offsetServer1.getCheckpointedLocalVtPosition(),
+            offsetServer2.getCheckpointedLocalVtPosition());
       }
     });
   }
@@ -134,7 +138,8 @@ public class BlobP2PTransferAmongServersTest {
     cluster = initializeVeniceCluster(false);
 
     String storeName = "test-store-format-not-match";
-    Consumer<UpdateStoreQueryParams> paramsConsumer = params -> params.setBlobTransferEnabled(true);
+    Consumer<UpdateStoreQueryParams> paramsConsumer =
+        params -> params.setBlobTransferInServerEnabled(ConfigCommonUtils.ActivationState.ENABLED);
     setUpBatchStore(cluster, storeName, paramsConsumer, properties -> {}, true);
 
     VeniceServerWrapper server1 = cluster.getVeniceServerByPort(server1Port);
@@ -212,7 +217,6 @@ public class BlobP2PTransferAmongServersTest {
     serverProperties.setProperty(ROCKSDB_PLAIN_TABLE_FORMAT_ENABLED, "false");
     serverProperties.setProperty(ConfigKeys.SERVER_DATABASE_CHECKSUM_VERIFICATION_ENABLED, "true");
     serverProperties.setProperty(ConfigKeys.SERVER_DATABASE_SYNC_BYTES_INTERNAL_FOR_DEFERRED_WRITE_MODE, "300");
-    serverProperties.setProperty(ConfigKeys.ENABLE_BLOB_TRANSFER, "true");
     serverProperties.setProperty(ConfigKeys.DATA_BASE_PATH, path1);
     serverProperties.setProperty(ConfigKeys.DAVINCI_P2P_BLOB_TRANSFER_SERVER_PORT, String.valueOf(port1));
     serverProperties.setProperty(ConfigKeys.DAVINCI_P2P_BLOB_TRANSFER_CLIENT_PORT, String.valueOf(port2));
@@ -309,7 +313,7 @@ public class BlobP2PTransferAmongServersTest {
         new UpdateStoreQueryParams().setStorageQuotaInByte(Store.UNLIMITED_STORAGE_QUOTA)
             .setHybridRewindSeconds(streamingRewindSeconds)
             .setHybridOffsetLagThreshold(streamingMessageLag)
-            .setBlobTransferEnabled(true));
+            .setBlobTransferInServerEnabled(ConfigCommonUtils.ActivationState.ENABLED));
 
     TestUtils.assertCommand(
         controllerClient.sendEmptyPushAndWait(storeName, Utils.getUniqueString("empty-hybrid-push"), 1L, 120000));
@@ -323,7 +327,9 @@ public class BlobP2PTransferAmongServersTest {
             server1.getVeniceServer().getStorageMetadataService().getLastOffset(storeName + "_v1", partitionId);
         OffsetRecord offsetRecord2 =
             server2.getVeniceServer().getStorageMetadataService().getLastOffset(storeName + "_v1", partitionId);
-        Assert.assertEquals(offsetRecord2.getLocalVersionTopicOffset(), offsetRecord1.getLocalVersionTopicOffset());
+        Assert.assertEquals(
+            offsetRecord2.getCheckpointedLocalVtPosition(),
+            offsetRecord1.getCheckpointedLocalVtPosition());
       }
     });
 
@@ -389,7 +395,9 @@ public class BlobP2PTransferAmongServersTest {
             server1.getVeniceServer().getStorageMetadataService().getLastOffset(storeName + "_v1", partitionId);
         OffsetRecord offsetServer2 =
             server2.getVeniceServer().getStorageMetadataService().getLastOffset(storeName + "_v1", partitionId);
-        Assert.assertEquals(offsetServer1.getLocalVersionTopicOffset(), offsetServer2.getLocalVersionTopicOffset());
+        Assert.assertEquals(
+            offsetServer1.getCheckpointedLocalVtPosition(),
+            offsetServer2.getCheckpointedLocalVtPosition());
       }
     });
   }

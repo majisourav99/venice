@@ -1,7 +1,5 @@
 package com.linkedin.davinci.config;
 
-import static com.linkedin.davinci.ingestion.utils.IsolatedIngestionUtils.INGESTION_ISOLATION_CONFIG_PREFIX;
-import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_TOTAL_MEMTABLE_USAGE_CAP_IN_BYTES;
 import static com.linkedin.venice.ConfigConstants.DEFAULT_MAX_RECORD_SIZE_BYTES_BACKFILL;
 import static com.linkedin.venice.ConfigKeys.ACL_IN_MEMORY_CACHE_TTL_MS;
 import static com.linkedin.venice.ConfigKeys.AUTOCREATE_DATA_PATH;
@@ -14,6 +12,7 @@ import static com.linkedin.venice.ConfigKeys.BLOB_TRANSFER_MANAGER_ENABLED;
 import static com.linkedin.venice.ConfigKeys.BLOB_TRANSFER_MAX_CONCURRENT_SNAPSHOT_USER;
 import static com.linkedin.venice.ConfigKeys.BLOB_TRANSFER_MAX_TIMEOUT_IN_MIN;
 import static com.linkedin.venice.ConfigKeys.BLOB_TRANSFER_PEERS_CONNECTIVITY_FRESHNESS_IN_SECONDS;
+import static com.linkedin.venice.ConfigKeys.BLOB_TRANSFER_RECEIVER_SERVER_POLICY;
 import static com.linkedin.venice.ConfigKeys.BLOB_TRANSFER_SERVICE_WRITE_LIMIT_BYTES_PER_SEC;
 import static com.linkedin.venice.ConfigKeys.BLOB_TRANSFER_SNAPSHOT_CLEANUP_INTERVAL_IN_MINS;
 import static com.linkedin.venice.ConfigKeys.BLOB_TRANSFER_SNAPSHOT_RETENTION_TIME_IN_MIN;
@@ -23,6 +22,7 @@ import static com.linkedin.venice.ConfigKeys.DAVINCI_P2P_BLOB_TRANSFER_CLIENT_PO
 import static com.linkedin.venice.ConfigKeys.DAVINCI_P2P_BLOB_TRANSFER_SERVER_PORT;
 import static com.linkedin.venice.ConfigKeys.DAVINCI_PUSH_STATUS_CHECK_INTERVAL_IN_MS;
 import static com.linkedin.venice.ConfigKeys.DAVINCI_RECORD_TRANSFORMER_ON_RECOVERY_THREAD_POOL_SIZE;
+import static com.linkedin.venice.ConfigKeys.DAVINCI_VALIDATE_SPECIFIC_SCHEMA_ENABLED;
 import static com.linkedin.venice.ConfigKeys.DA_VINCI_CURRENT_VERSION_BOOTSTRAPPING_QUOTA_BYTES_PER_SECOND;
 import static com.linkedin.venice.ConfigKeys.DA_VINCI_CURRENT_VERSION_BOOTSTRAPPING_QUOTA_RECORDS_PER_SECOND;
 import static com.linkedin.venice.ConfigKeys.DA_VINCI_CURRENT_VERSION_BOOTSTRAPPING_SPEEDUP_ENABLED;
@@ -37,9 +37,6 @@ import static com.linkedin.venice.ConfigKeys.GRPC_SERVER_WORKER_THREAD_COUNT;
 import static com.linkedin.venice.ConfigKeys.HELIX_HYBRID_STORE_QUOTA_ENABLED;
 import static com.linkedin.venice.ConfigKeys.HYBRID_QUOTA_ENFORCEMENT_ENABLED;
 import static com.linkedin.venice.ConfigKeys.IDENTITY_PARSER_CLASS;
-import static com.linkedin.venice.ConfigKeys.INGESTION_MEMORY_LIMIT;
-import static com.linkedin.venice.ConfigKeys.INGESTION_MEMORY_LIMIT_STORE_LIST;
-import static com.linkedin.venice.ConfigKeys.INGESTION_MLOCK_ENABLED;
 import static com.linkedin.venice.ConfigKeys.INGESTION_USE_DA_VINCI_CLIENT;
 import static com.linkedin.venice.ConfigKeys.KAFKA_FETCH_THROTTLER_FACTORS_PER_SECOND;
 import static com.linkedin.venice.ConfigKeys.KEY_VALUE_PROFILING_ENABLED;
@@ -204,6 +201,7 @@ import static com.linkedin.venice.ConfigKeys.STORE_WRITER_BUFFER_NOTIFY_DELTA;
 import static com.linkedin.venice.ConfigKeys.STORE_WRITER_NUMBER;
 import static com.linkedin.venice.ConfigKeys.SYSTEM_SCHEMA_CLUSTER_NAME;
 import static com.linkedin.venice.ConfigKeys.SYSTEM_SCHEMA_INITIALIZATION_AT_START_TIME_ENABLED;
+import static com.linkedin.venice.ConfigKeys.TIME_LAG_THRESHOLD_FOR_FAST_ONLINE_TRANSITION_IN_RESTART_MINUTES;
 import static com.linkedin.venice.ConfigKeys.UNREGISTER_METRIC_FOR_DELETED_STORE_ENABLED;
 import static com.linkedin.venice.ConfigKeys.UNSORTED_INPUT_DRAINER_SIZE;
 import static com.linkedin.venice.ConfigKeys.USE_DA_VINCI_SPECIFIC_EXECUTION_STATUS_FOR_ERROR;
@@ -227,6 +225,7 @@ import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.meta.IngestionMode;
 import com.linkedin.venice.pubsub.PubSubClientsFactory;
 import com.linkedin.venice.throttle.VeniceRateLimiter;
+import com.linkedin.venice.utils.ConfigCommonUtils;
 import com.linkedin.venice.utils.LogContext;
 import com.linkedin.venice.utils.Time;
 import com.linkedin.venice.utils.Utils;
@@ -240,10 +239,8 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.LogManager;
@@ -487,6 +484,7 @@ public class VeniceServerConfig extends VeniceClusterConfig {
 
   private final long sharedConsumerNonExistingTopicCleanupDelayMS;
   private final int offsetLagDeltaRelaxFactorForFastOnlineTransitionInRestart;
+  private final int timeLagThresholdForFastOnlineTransitionInRestartMinutes;
 
   /**
    * Boolean flag indicating if it is a Da Vinci application.
@@ -551,9 +549,6 @@ public class VeniceServerConfig extends VeniceClusterConfig {
    */
   private final int sslHandshakeQueueCapacity;
 
-  private final long ingestionMemoryLimit;
-  private final boolean ingestionMlockEnabled;
-  private final Set<String> ingestionMemoryLimitStoreSet;
   private final List<String> forkedProcessJvmArgList;
 
   private final long divProducerStateMaxAgeMs;
@@ -596,6 +591,7 @@ public class VeniceServerConfig extends VeniceClusterConfig {
   private final boolean recordLevelMetricWhenBootstrappingCurrentVersionEnabled;
   private final String identityParserClassName;
   private final boolean blobTransferManagerEnabled;
+  private final ConfigCommonUtils.ActivationState blobTransferReceiverServerPolicy;
   private final boolean blobTransferSslEnabled;
   private final boolean blobTransferAclEnabled;
   private final int snapshotRetentionTimeInMin;
@@ -649,6 +645,8 @@ public class VeniceServerConfig extends VeniceClusterConfig {
   private final boolean isParticipantMessageStoreEnabled;
   private final long consumerPollTrackerStaleThresholdInSeconds;
   private final int daVinciRecordTransformerOnRecoveryThreadPoolSize;
+
+  private final boolean validateSpecificSchemaEnabled;
   private final LogContext logContext;
   private final IngestionTaskReusableObjects.Strategy ingestionTaskReusableObjectsStrategy;
 
@@ -678,6 +676,9 @@ public class VeniceServerConfig extends VeniceClusterConfig {
         serverProperties.getInt(MAX_LEADER_FOLLOWER_STATE_TRANSITION_THREAD_NUMBER, 20);
 
     blobTransferManagerEnabled = serverProperties.getBoolean(BLOB_TRANSFER_MANAGER_ENABLED, false);
+    blobTransferReceiverServerPolicy = ConfigCommonUtils.ActivationState.valueOf(
+        serverProperties
+            .getString(BLOB_TRANSFER_RECEIVER_SERVER_POLICY, ConfigCommonUtils.ActivationState.NOT_SPECIFIED.name()));
     blobTransferSslEnabled = serverProperties.getBoolean(BLOB_TRANSFER_SSL_ENABLED, false);
     blobTransferAclEnabled = serverProperties.getBoolean(BLOB_TRANSFER_ACL_ENABLED, false);
 
@@ -890,6 +891,9 @@ public class VeniceServerConfig extends VeniceClusterConfig {
 
     offsetLagDeltaRelaxFactorForFastOnlineTransitionInRestart =
         serverProperties.getInt(OFFSET_LAG_DELTA_RELAX_FACTOR_FOR_FAST_ONLINE_TRANSITION_IN_RESTART, 2);
+    timeLagThresholdForFastOnlineTransitionInRestartMinutes =
+        serverProperties.getInt(TIME_LAG_THRESHOLD_FOR_FAST_ONLINE_TRANSITION_IN_RESTART_MINUTES, -1);
+
     enableKafkaConsumerOffsetCollection =
         serverProperties.getBoolean(SERVER_KAFKA_CONSUMER_OFFSET_COLLECTION_ENABLED, true);
     dedicatedDrainerQueueEnabled =
@@ -936,16 +940,6 @@ public class VeniceServerConfig extends VeniceClusterConfig {
             .map(s -> s.trim())
             .filter(s -> s.length() > 0)
             .collect(Collectors.toList());
-    ingestionMemoryLimit = extractIngestionMemoryLimit(serverProperties, ingestionMode, forkedProcessJvmArgList);
-    LOGGER.debug("Ingestion memory limit: {} after subtracting other usages", ingestionMemoryLimit);
-    ingestionMlockEnabled = serverProperties.getBoolean(INGESTION_MLOCK_ENABLED, false);
-    if (!serverProperties.getString(INGESTION_MEMORY_LIMIT_STORE_LIST, "").isEmpty()) {
-      ingestionMemoryLimitStoreSet =
-          new HashSet<>(serverProperties.getList(INGESTION_MEMORY_LIMIT_STORE_LIST, Collections.emptyList()));
-    } else {
-      ingestionMemoryLimitStoreSet = Collections.emptySet();
-    }
-
     divProducerStateMaxAgeMs = serverProperties.getLong(DIV_PRODUCER_STATE_MAX_AGE_MS, DataIntegrityValidator.DISABLED);
     pubSubClientsFactory = new PubSubClientsFactory(serverProperties);
     routerPrincipalName = serverProperties.getString(ROUTER_PRINCIPAL_NAME, "venice-router");
@@ -1106,6 +1100,7 @@ public class VeniceServerConfig extends VeniceClusterConfig {
         serverProperties.getString(
             SERVER_INGESTION_TASK_REUSABLE_OBJECTS_STRATEGY,
             IngestionTaskReusableObjects.Strategy.THREAD_LOCAL_PER_INGESTION_TASK.name()));
+    this.validateSpecificSchemaEnabled = serverProperties.getBoolean(DAVINCI_VALIDATE_SPECIFIC_SCHEMA_ENABLED, true);
   }
 
   List<Double> extractThrottleLimitFactorsFor(VeniceProperties serverProperties, String configKey) {
@@ -1114,77 +1109,6 @@ public class VeniceServerConfig extends VeniceClusterConfig {
     }
     List<String> factorsList = serverProperties.getList(configKey);
     return factorsList.stream().map(Double::parseDouble).collect(Collectors.toList());
-  }
-
-  long extractIngestionMemoryLimit(
-      VeniceProperties serverProperties,
-      IngestionMode configuredIngestionMode,
-      List<String> configuredForkedProcessJvmArgList) {
-    long extractedMemoryLimit = -1;
-    long configuredIngestionMemoryLimit = serverProperties.getSizeInBytes(INGESTION_MEMORY_LIMIT, -1l);
-    if (configuredIngestionMemoryLimit < 0) {
-      return extractedMemoryLimit;
-    }
-    // Check whether it is being used by DaVinci or not
-    if (!isDaVinciClient) {
-      throw new VeniceException(
-          "Config: " + INGESTION_MEMORY_LIMIT
-              + " is only meaningful for DaVinci and please remove this config for Venice Server deployment");
-    }
-    // Check whether rocksdb is using PT or not
-    if (!rocksDBServerConfig.isRocksDBPlainTableFormatEnabled()) {
-      throw new VeniceException(
-          "Config: " + INGESTION_MEMORY_LIMIT + " is only meaningful when using RocksDB plaintable format");
-    }
-    long totalMemtableUsage = rocksDBServerConfig.getRocksDBTotalMemtableUsageCapInBytes();
-    // Check ingestion mode
-    if (configuredIngestionMode.equals(IngestionMode.ISOLATED)) {
-      /**
-       * When ingestion isolation is enabled, we need to subtract the usages from the following componnets:
-       * 1. Main process total memtable usage limit.
-       * 2. Heap size of isolated JVM process.
-       * 3. Total memtable usage limit in isolated process.
-       */
-
-      String forkedProcessHeapSizeStr = null;
-      for (String s: configuredForkedProcessJvmArgList) {
-        if (s.toLowerCase().startsWith("-xmx")) {
-          forkedProcessHeapSizeStr = s.toLowerCase().substring(4);
-          break;
-        }
-      }
-      if (forkedProcessHeapSizeStr == null || forkedProcessHeapSizeStr.length() == 0) {
-        throw new VeniceException(
-            "The max heap size of isolated process needs to be configured explicitly when enabling memory limiter");
-      }
-      LOGGER.info("Extracted max heap size of forked process: {} ", forkedProcessHeapSizeStr);
-      long forkedProcessHeapSize = VeniceProperties.convertSizeFromLiteral(forkedProcessHeapSizeStr);
-
-      long totalMemtableUsageInForkedProcess = serverProperties.getSizeInBytes(
-          INGESTION_ISOLATION_CONFIG_PREFIX + "." + ROCKSDB_TOTAL_MEMTABLE_USAGE_CAP_IN_BYTES,
-          totalMemtableUsage);
-      LOGGER.info(
-          "Extracted total memtable table usage capacity in forked process: {}",
-          totalMemtableUsageInForkedProcess);
-
-      extractedMemoryLimit = configuredIngestionMemoryLimit - totalMemtableUsage - forkedProcessHeapSize
-          - totalMemtableUsageInForkedProcess;
-      if (extractedMemoryLimit <= 0) {
-        throw new VeniceException(
-            "Ingestion memory limit: " + extractedMemoryLimit
-                + " should be positive after subtracting the usage from other components");
-      }
-    } else {
-      // We need to subtract the memtable usage from the configured limit
-      if (configuredIngestionMemoryLimit <= totalMemtableUsage) {
-        throw new VeniceException(
-            "Ingestion memory limit: " + configuredIngestionMemoryLimit
-                + " should be bigger than total memtable usage cap: " + totalMemtableUsage);
-      }
-      extractedMemoryLimit = configuredIngestionMemoryLimit - totalMemtableUsage;
-    }
-
-    return extractedMemoryLimit;
   }
 
   private VeniceRateLimiter.RateLimiterType extractRateLimiterType(String rateLimiterTypeStr) {
@@ -1221,6 +1145,10 @@ public class VeniceServerConfig extends VeniceClusterConfig {
 
   public boolean isBlobTransferManagerEnabled() {
     return blobTransferManagerEnabled;
+  }
+
+  public ConfigCommonUtils.ActivationState getBlobTransferReceiverServerPolicy() {
+    return blobTransferReceiverServerPolicy;
   }
 
   public boolean isBlobTransferSslEnabled() {
@@ -1576,6 +1504,10 @@ public class VeniceServerConfig extends VeniceClusterConfig {
     return offsetLagDeltaRelaxFactorForFastOnlineTransitionInRestart;
   }
 
+  public int getTimeLagThresholdForFastOnlineTransitionInRestartMinutes() {
+    return timeLagThresholdForFastOnlineTransitionInRestartMinutes;
+  }
+
   public boolean isKafkaConsumerOffsetCollectionEnabled() {
     return enableKafkaConsumerOffsetCollection;
   }
@@ -1696,20 +1628,8 @@ public class VeniceServerConfig extends VeniceClusterConfig {
     return sslHandshakeQueueCapacity;
   }
 
-  public long getIngestionMemoryLimit() {
-    return ingestionMemoryLimit;
-  }
-
   public List<String> getForkedProcessJvmArgList() {
     return forkedProcessJvmArgList;
-  }
-
-  public boolean isIngestionMlockEnabled() {
-    return ingestionMlockEnabled;
-  }
-
-  public boolean enforceMemoryLimitInStore(String storeName) {
-    return ingestionMemoryLimitStoreSet.isEmpty() || ingestionMemoryLimitStoreSet.contains(storeName);
   }
 
   public long getDivProducerStateMaxAgeMs() {
@@ -2058,5 +1978,9 @@ public class VeniceServerConfig extends VeniceClusterConfig {
 
   public IngestionTaskReusableObjects.Strategy getIngestionTaskReusableObjectsStrategy() {
     return this.ingestionTaskReusableObjectsStrategy;
+  }
+
+  public boolean isValidateSpecificSchemaEnabled() {
+    return this.validateSpecificSchemaEnabled;
   }
 }

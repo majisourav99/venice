@@ -13,6 +13,7 @@ import com.linkedin.venice.kafka.protocol.VersionSwap;
 import com.linkedin.venice.kafka.protocol.enums.ControlMessageType;
 import com.linkedin.venice.message.KafkaKey;
 import com.linkedin.venice.meta.Version;
+import com.linkedin.venice.pubsub.api.PubSubPosition;
 import com.linkedin.venice.pubsub.api.PubSubSymbolicPosition;
 import com.linkedin.venice.schema.rmd.RmdUtils;
 import com.linkedin.venice.utils.VeniceProperties;
@@ -125,12 +126,9 @@ public class ChangeCaptureViewWriter extends VeniceViewWriter {
       return;
     }
 
-    Map<String, Long> sortedWaterMarkOffsets = partitionConsumptionState.getLatestProcessedUpstreamRTOffsetMap();
+    Map<String, PubSubPosition> sortedWaterMarkOffsets = partitionConsumptionState.getLatestProcessedRtPositions();
 
     List<Long> highWaterMarkOffsets;
-    /**
-     * TODO(sushantmane): Once we update OffsetRecord to use PubSubPosition, we should pop up this field from the PCS
-     */
     List<ByteBuffer> highWaterMarkPubSubPositions;
     if (maxColoIdValue > -1) {
       highWaterMarkOffsets = new ArrayList<>(Collections.nCopies(maxColoIdValue + 1, 0L));
@@ -139,7 +137,10 @@ public class ChangeCaptureViewWriter extends VeniceViewWriter {
       for (String url: sortedWaterMarkOffsets.keySet()) {
         highWaterMarkOffsets.set(
             kafkaClusterUrlToIdMap.getInt(url),
-            partitionConsumptionState.getLatestProcessedUpstreamRTOffsetMap().get(url));
+            partitionConsumptionState.getLatestProcessedRtPositions().get(url).getNumericOffset());
+        highWaterMarkPubSubPositions.set(
+            kafkaClusterUrlToIdMap.getInt(url),
+            partitionConsumptionState.getLatestProcessedRtPositions().get(url).toWireFormatBuffer());
       }
     } else {
       highWaterMarkOffsets = Collections.emptyList();
