@@ -75,9 +75,9 @@ public class TopicManagerIntegrationTest extends TopicManagerTest {
     ExecutorService executorService = Executors.newFixedThreadPool(numberOfThreads);
     Future[] vwFutures = new Future[numberOfThreads];
     // Put all topic manager calls related to partition offset fetcher with admin and consumer here.
-    Runnable[] tasks = { () -> topicManager.getOffsetByTime(pubSubTopicPartition, checkTimestamp),
+    Runnable[] tasks = { () -> topicManager.getPositionByTime(pubSubTopicPartition, checkTimestamp),
         () -> topicManager.getPartitionCount(topic),
-        () -> topicManager.getLatestOffsetWithRetries(pubSubTopicPartition, 1),
+        () -> topicManager.getLatestPositionWithRetries(pubSubTopicPartition, 1),
         () -> topicManager.getEndPositionsForTopicWithRetries(topic) };
 
     for (int i = 0; i < numberOfThreads; i++) {

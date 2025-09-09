@@ -39,6 +39,7 @@ public enum Arg {
   STORAGE_NODE("storage-node", "n", true, "Helix instance ID for a storage node, eg. lva1-app1234_1690"),
   KEY("key", "k", true, "Plain-text key for identifying a record in a store"),
   OFFSET("offset", "of", true, "Kafka offset number"),
+  EXECUTION_ID("execution-id", "eid", true, "Execution ID of admin operation"),
   EXECUTION("execution", "e", true, "Execution ID of async admin command"),
   PARTITION_COUNT("partition-count", "pn", true, "number of partitions a store has"),
   PARTITIONER_CLASS("partitioner-class", "pc", true, "Name of chosen partitioner class"),
@@ -118,6 +119,10 @@ public enum Arg {
   ),
   VENICE_CLIENT_SSL_CONFIG_FILE(
       "venice-client-ssl-config-file", "vcsc", true, "Configuration file for querying key in Venice client through SSL."
+  ),
+  STARTING_POSITION(
+      "starting_position", "sp", true,
+      "Starting <typeId:base64EncodedPositionBytes> when dumping admin messages, inclusive"
   ), STARTING_OFFSET("starting_offset", "so", true, "Starting offset when dumping admin messages, inclusive"),
   MESSAGE_COUNT("message_count", "mc", true, "Max message count when dumping admin messages"),
   PARENT_DIRECTORY(
@@ -316,6 +321,10 @@ public enum Arg {
   ), ENABLE_STORE_MIGRATION("enable-store-migration", "esm", true, "Toggle store migration store config"),
   ADMIN_OPERATION_PROTOCOL_VERSION(
       "admin-operation-protocol-version", "aopv", true, "Admin operation protocol version"
+  ),
+  STORES_TO_REPLICATE(
+      "stores-to-replicate", "str", true,
+      "Comma separated list of stores to be replicated to dark cluster, eg. store1,store2,..."
   ), GLOBAL_RT_DIV_ENABLED("global-rt-div-enabled", "grde", true, "Enable Global RT DIV for a store"),
   ENUM_SCHEMA_EVOLUTION_ALLOWED(
       "enum-schema-evolution-allowed", "esea", true, "Allow enum schema evolution for a store"

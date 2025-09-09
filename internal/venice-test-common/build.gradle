@@ -145,13 +145,15 @@ def integrationTestConfigs = {
 
 def integrationTestBuckets = [
     "1": [
-        "com.linkedin.venice.endToEnd.PartialUpdateWithHeartbeatReadyToServeCheckTest"
+        "com.linkedin.venice.endToEnd.PartialUpdateWithHeartbeatReadyToServeCheckTest",
+        "com.linkedin.venice.endToEnd.TestIncrementalPush"
     ],
     "2": [
-        "com.linkedin.venice.endToEnd.PartialUpdateTest"
+        "com.linkedin.venice.endToEnd.PartialUpdateTest",
+        "com.linkedin.venice.endToEnd.TestRepush"
     ],
     "3": [
-        "com.linkedin.venice.endToEnd.PartialUpdateWithParallelProcessingTest"
+        "com.linkedin.venice.consumer.BootstrappingChangelogConsumerTest"
     ],
     "4": [
         "com.linkedin.venice.endToEnd.TestDeferredVersionSwap",
@@ -207,8 +209,7 @@ def integrationTestBuckets = [
         "com.linkedin.venice.endToEnd.DaVinciClientTest",
         "com.linkedin.venice.endToEnd.TestBatchForRocksDB",
         "com.linkedin.venice.controller.TestHAASController",
-        "com.linkedin.venice.server.VeniceServerTest",
-        "com.linkedin.venice.endToEnd.TestTopicWiseSharedConsumerPoolResilience"
+        "com.linkedin.venice.server.VeniceServerTest"
     ],
     "13": [
         "com.linkedin.venice.endToEnd.DaVinciComputeTest",
@@ -383,9 +384,6 @@ def integrationTestBuckets = [
         "com.linkedin.venice.endToEnd.PushStatusStoreTest"
     ],
     "22": [
-        "com.linkedin.venice.consumer.BootstrappingChangelogConsumerTest"
-    ],
-    "23": [
         "com.linkedin.venice.endToEnd.TestEmptyPush",
         "com.linkedin.venice.endToEnd.SystemStoreMultiColoTest",
         "com.linkedin.venice.endToEnd.CheckSumTest",

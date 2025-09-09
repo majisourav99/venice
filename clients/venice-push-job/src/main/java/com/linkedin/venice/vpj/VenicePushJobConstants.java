@@ -27,10 +27,10 @@ public final class VenicePushJobConstants {
 
   public static final String KEY_FIELD_PROP = "key.field";
   public static final String VALUE_FIELD_PROP = "value.field";
-  public static final String TIMESTAMP_FIELD_PROP = "timestamp.field";
+  public static final String RMD_FIELD_PROP = "timestamp.field";
   public static final String DEFAULT_KEY_FIELD_PROP = "key";
   public static final String DEFAULT_VALUE_FIELD_PROP = "value";
-  public static final String DEFAULT_TIMESTAMP_FIELD_PROP = "timestamp";
+  public static final String DEFAULT_RMD_FIELD_PROP = "rmd";
   public static final boolean DEFAULT_SSL_ENABLED = false;
   public static final String SCHEMA_STRING_PROP = "schema";
   public static final String KAFKA_SOURCE_KEY_SCHEMA_STRING_PROP = "kafka.source.key.schema";
@@ -236,6 +236,13 @@ public final class VenicePushJobConstants {
   public static final String REWIND_EPOCH_TIME_IN_SECONDS_OVERRIDE = "rewind.epoch.time.in.seconds.override";
 
   /**
+   * Relates to the {@link #REWIND_EPOCH_TIME_IN_SECONDS_OVERRIDE}. An overridable amount of buffer to be applied to the epoch
+   * (as the rewind isn't perfectly instantaneous). Defaults to 1 minute.
+   */
+  public static final String REWIND_EPOCH_TIME_BUFFER_IN_SECONDS_OVERRIDE =
+      "rewind.epoch.time.buffer.in.seconds.override";
+
+  /**
    * This config is a boolean which suppresses submitting the end of push message after data has been sent and does
    * not poll for the status of the job to complete. Using this flag means that a user must manually mark the job success
    * or failed.
@@ -257,13 +264,6 @@ public final class VenicePushJobConstants {
    * This config specifies the region identifier where parent controller is running
    */
   public static final String PARENT_CONTROLLER_REGION_NAME = "parent.controller.region.name";
-
-  /**
-   * Relates to the above argument. An overridable amount of buffer to be applied to the epoch (as the rewind isn't
-   * perfectly instantaneous). Defaults to 1 minute.
-   */
-  public static final String REWIND_EPOCH_TIME_BUFFER_IN_SECONDS_OVERRIDE =
-      "rewind.epoch.time.buffer.in.seconds.override";
 
   /**
    * In single-region mode, this must be a comma-separated list of child controller URLs or {@literal d2://<d2ServiceNameForChildController>}
@@ -298,6 +298,8 @@ public final class VenicePushJobConstants {
   public static final FsPermission PERMISSION_700 = FsPermission.createImmutable((short) 0700);
 
   public static final String VALUE_SCHEMA_ID_PROP = "value.schema.id";
+
+  public static final String RMD_SCHEMA_ID_PROP = "rmd.schema.id";
   public static final String DERIVED_SCHEMA_ID_PROP = "derived.schema.id";
   public static final String TOPIC_PROP = "venice.kafka.topic";
   public static final String HADOOP_VALIDATE_SCHEMA_AND_BUILD_DICT_PREFIX = "hadoop-dict-build-conf.";
