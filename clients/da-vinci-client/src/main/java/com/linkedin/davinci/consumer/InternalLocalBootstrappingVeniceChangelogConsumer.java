@@ -21,6 +21,7 @@ import com.linkedin.davinci.stats.RocksDBMemoryStats;
 import com.linkedin.davinci.storage.StorageEngineMetadataService;
 import com.linkedin.davinci.storage.StorageMetadataService;
 import com.linkedin.davinci.storage.StorageService;
+import com.linkedin.davinci.store.DelegatingStorageEngine;
 import com.linkedin.davinci.store.StorageEngine;
 import com.linkedin.davinci.store.record.ValueRecord;
 import com.linkedin.venice.client.change.capture.protocol.RecordChangeEvent;
@@ -175,13 +176,25 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
             : new VeniceChangeCoordinate(topicPartition.getPubSubTopic().getName(), earliestOffset, partition);
 
         // If earliest offset is larger than the local, we should just bootstrap from beginning.
-        if (earliestCheckpoint != null && earliestCheckpoint.comparePosition(localCheckpoint) > -1) {
+        if (earliestCheckpoint != null
+            && earliestCheckpoint.comparePosition(pubSubConsumer, topicPartition, localCheckpoint) > -1L) {
           return false;
         }
       }
 
       return true;
     };
+  }
+
+  StorageEngine getStorageEngine(String resourceName) {
+    StorageEngine storageEngine = storageService.getStorageEngine(resourceName);
+    if (!(storageEngine instanceof DelegatingStorageEngine)) {
+      throw new VeniceException("Storage engine for store: " + resourceName + " isn't a DelegatingStorageEngine");
+    } else {
+      // Key urn compression is not supported for changelog consumer
+      ((DelegatingStorageEngine) storageEngine).setKeyDictCompressionFunction(ignored -> null);
+    }
+    return storageEngine;
   }
 
   @Override
@@ -267,18 +280,17 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
         // read from storage engine
         Collection<PubSubMessage<K, ChangeEvent<V>, VeniceChangeCoordinate>> resultSet = new ArrayList<>();
         AtomicBoolean completed = new AtomicBoolean(false);
-        storageService.getStorageEngine(localStateTopicName)
-            .getByKeyPrefix(state.getKey(), null, new BytesStreamingCallback() {
-              @Override
-              public void onRecordReceived(byte[] key, byte[] value) {
-                onRecordReceivedFromStorage(key, value, state.getKey(), resultSet);
-              }
+        getStorageEngine(localStateTopicName).getByKeyPrefix(state.getKey(), null, new BytesStreamingCallback() {
+          @Override
+          public void onRecordReceived(byte[] key, byte[] value) {
+            onRecordReceivedFromStorage(key, value, state.getKey(), resultSet);
+          }
 
-              @Override
-              public void onCompletion() {
-                onCompletionForStorage(state.getKey(), state.getValue(), resultSet, completed);
-              }
-            });
+          @Override
+          public void onCompletion() {
+            onCompletionForStorage(state.getKey(), state.getValue(), resultSet, completed);
+          }
+        });
         if (!completed.get()) {
           throw new VeniceException("Interrupted while reading local bootstrap data!");
         }
@@ -293,8 +305,7 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
    */
   private void syncOffset(int partitionId, BootstrapState bootstrapState) {
     OffsetRecord lastOffset = storageMetadataService.getLastOffset(localStateTopicName, partitionId);
-    StorageEngine storageEngineReloadedFromRepo =
-        storageService.getStorageEngineRepository().getLocalStorageEngine(localStateTopicName);
+    StorageEngine storageEngineReloadedFromRepo = getStorageEngine(localStateTopicName);
     if (storageEngineReloadedFromRepo == null) {
       String replicaId = Utils.getReplicaId(localStateTopicName, partitionId);
       LOGGER.warn("Storage engine has been removed. Could not execute sync offset for replica: {}", replicaId);
@@ -308,13 +319,14 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
     try {
       dbInfo.put(
           CHANGE_CAPTURE_COORDINATE,
-          VeniceChangeCoordinate.convertVeniceChangeCoordinateToStringAndEncode(bootstrapState.currentPubSubPosition));
+          VeniceChangeCoordinate
+              .convertVeniceChangeCoordinateToStringAndEncode(bootstrapState.currentChangeCoordinate));
       LOGGER.info(
           "Update checkpoint for partition: {}, new offset: {}",
           partitionId,
-          bootstrapState.currentPubSubPosition);
+          bootstrapState.currentChangeCoordinate);
     } catch (IOException e) {
-      LOGGER.error("Failed to update change capture coordinate position: {}", bootstrapState.currentPubSubPosition);
+      LOGGER.error("Failed to update change capture coordinate position: {}", bootstrapState.currentChangeCoordinate);
     }
 
     lastOffset.setDatabaseInfo(dbInfo);
@@ -400,13 +412,13 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
         super.internalPoll(timeoutInMs, topicSuffix, true);
     for (PubSubMessage<K, ChangeEvent<V>, VeniceChangeCoordinate> record: polledResults) {
       BootstrapState currentPartitionState = bootstrapStateMap.get(record.getPartition());
-      currentPartitionState.currentPubSubPosition = record.getOffset();
+      currentPartitionState.currentChangeCoordinate = record.getPosition();
       if (currentPartitionState.bootstrapState.equals(PollState.CATCHING_UP)) {
-        if (currentPartitionState.isCaughtUp()) {
+        if (currentPartitionState.isCaughtUp(pubSubConsumer)) {
           LOGGER.info(
-              "pollAndCatchup completed for partition: {} with offset: {}, put message: {}, delete message: {}",
+              "pollAndCatchup completed for partition: {} with vcc: {}, put message: {}, delete message: {}",
               record.getPartition(),
-              record.getOffset(),
+              record.getPosition(),
               partitionToPutMessageCount.getOrDefault(record.getPartition(), new AtomicLong(0)).get(),
               partitionToDeleteMessageCount.getOrDefault(record.getPartition(), new AtomicLong(0)).get());
           currentPartitionState.bootstrapState = PollState.BOOTSTRAPPING;
@@ -427,26 +439,24 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
     if (deserializedValue instanceof RecordChangeEvent) {
       RecordChangeEvent recordChangeEvent = (RecordChangeEvent) deserializedValue;
       if (recordChangeEvent.currentValue == null) {
-        storageService.getStorageEngine(localStateTopicName).delete(partition.getPartitionNumber(), key);
+        getStorageEngine(localStateTopicName).delete(partition.getPartitionNumber(), key);
       } else {
-        storageService.getStorageEngine(localStateTopicName)
-            .put(
-                partition.getPartitionNumber(),
-                key,
-                ValueRecord
-                    .create(recordChangeEvent.currentValue.schemaId, recordChangeEvent.currentValue.value.array())
-                    .serialize());
+        getStorageEngine(localStateTopicName).put(
+            partition.getPartitionNumber(),
+            key,
+            ValueRecord.create(recordChangeEvent.currentValue.schemaId, recordChangeEvent.currentValue.value.array())
+                .serialize());
       }
     } else {
       byte[] valueBytes = ByteUtils.extractByteArray(decompressedBytes);
-      storageService.getStorageEngine(localStateTopicName)
+      getStorageEngine(localStateTopicName)
           .put(partition.getPartitionNumber(), key, ValueRecord.create(readerSchemaId, valueBytes).serialize());
     }
 
     // Update currentPubSubPosition for a partition
     BootstrapState bootstrapState = bootstrapStateMap.get(partition.getPartitionNumber());
-    VeniceChangeCoordinate currentPubSubPosition = bootstrapState.currentPubSubPosition;
-    bootstrapState.currentPubSubPosition = new VeniceChangeCoordinate(
+    VeniceChangeCoordinate currentPubSubPosition = bootstrapState.currentChangeCoordinate;
+    bootstrapState.currentChangeCoordinate = new VeniceChangeCoordinate(
         currentPubSubPosition.getTopic(),
         recordOffset,
         currentPubSubPosition.getPartition(),
@@ -480,6 +490,7 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
         // Where we're at now
         String offsetString = offsetRecord.getDatabaseInfo().get(CHANGE_CAPTURE_COORDINATE);
         VeniceChangeCoordinate localCheckpoint;
+        PubSubTopicPartition topicPartition = getTopicPartition(partition);
         try {
           if (StringUtils.isEmpty(offsetString)) {
             LOGGER.info(
@@ -487,7 +498,7 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
                 partition,
                 offsetRecord.getCheckpointedLocalVtPosition());
             localCheckpoint = new VeniceChangeCoordinate(
-                getTopicPartition(partition).getPubSubTopic().getName(),
+                topicPartition.getPubSubTopic().getName(),
                 offsetRecord.getCheckpointedLocalVtPosition(),
                 partition);
           } else {
@@ -512,10 +523,11 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
         LOGGER.info("Got latest offset: {} for partition: {}", targetCheckpoint, partition);
 
         synchronized (bootstrapStateMap) {
-          BootstrapState newState = new BootstrapState();
-          newState.currentPubSubPosition = localCheckpoint;
-          newState.targetPubSubPosition = targetCheckpoint;
-          newState.bootstrapState = newState.isCaughtUp() ? PollState.BOOTSTRAPPING : PollState.CATCHING_UP;
+          BootstrapState newState = new BootstrapState(topicPartition);
+          newState.currentChangeCoordinate = localCheckpoint;
+          newState.targetChangeCoordinate = targetCheckpoint;
+          newState.bootstrapState =
+              newState.isCaughtUp(pubSubConsumer) ? PollState.BOOTSTRAPPING : PollState.CATCHING_UP;
           bootstrapStateMap.put(partition, newState);
         }
       }
@@ -523,7 +535,7 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
       // Seek to the current position, so we can catch up from there to target
       try {
         seekToCheckpoint(
-            bootstrapStateMap.values().stream().map(state -> state.currentPubSubPosition).collect(Collectors.toSet()))
+            bootstrapStateMap.values().stream().map(state -> state.currentChangeCoordinate).collect(Collectors.toSet()))
                 .get();
       } catch (Exception e) {
         throw new VeniceException("Caught exception when seeking to bootstrap", e);
@@ -596,13 +608,18 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
   }
 
   static class BootstrapState {
+    private final PubSubTopicPartition topicPartition;
     PollState bootstrapState;
-    VeniceChangeCoordinate currentPubSubPosition;
-    VeniceChangeCoordinate targetPubSubPosition;
+    VeniceChangeCoordinate currentChangeCoordinate;
+    VeniceChangeCoordinate targetChangeCoordinate;
     long processedRecordSizeSinceLastSync;
 
-    boolean isCaughtUp() {
-      return currentPubSubPosition.comparePosition(targetPubSubPosition) > -1;
+    public BootstrapState(PubSubTopicPartition topicPartition) {
+      this.topicPartition = topicPartition;
+    }
+
+    boolean isCaughtUp(PubSubConsumerAdapter pubSubConsumer) {
+      return currentChangeCoordinate.comparePosition(pubSubConsumer, topicPartition, targetChangeCoordinate) > -1;
     }
 
     /**

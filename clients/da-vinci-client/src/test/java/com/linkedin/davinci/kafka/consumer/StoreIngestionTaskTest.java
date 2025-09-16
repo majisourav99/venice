@@ -16,6 +16,7 @@ import static com.linkedin.venice.ConfigKeys.HYBRID_QUOTA_ENFORCEMENT_ENABLED;
 import static com.linkedin.venice.ConfigKeys.KAFKA_BOOTSTRAP_SERVERS;
 import static com.linkedin.venice.ConfigKeys.KAFKA_CLUSTER_MAP_KEY_NAME;
 import static com.linkedin.venice.ConfigKeys.KAFKA_CLUSTER_MAP_KEY_URL;
+import static com.linkedin.venice.ConfigKeys.KEY_URN_COMPRESSION_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_AA_WC_WORKLOAD_PARALLEL_PROCESSING_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_DATABASE_CHECKSUM_VERIFICATION_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_ENABLE_LIVE_CONFIG_BASED_KAFKA_THROTTLING;
@@ -104,6 +105,7 @@ import com.linkedin.davinci.storage.StorageService;
 import com.linkedin.davinci.store.AbstractStorageEngine;
 import com.linkedin.davinci.store.AbstractStorageIterator;
 import com.linkedin.davinci.store.AbstractStoragePartition;
+import com.linkedin.davinci.store.DelegatingStorageEngine;
 import com.linkedin.davinci.store.StorageEngine;
 import com.linkedin.davinci.store.StorageEngineNoOpStats;
 import com.linkedin.davinci.store.StoragePartitionConfig;
@@ -159,7 +161,6 @@ import com.linkedin.venice.pubsub.PubSubPositionDeserializer;
 import com.linkedin.venice.pubsub.PubSubPositionTypeRegistry;
 import com.linkedin.venice.pubsub.PubSubTopicPartitionImpl;
 import com.linkedin.venice.pubsub.PubSubTopicRepository;
-import com.linkedin.venice.pubsub.PubSubUtil;
 import com.linkedin.venice.pubsub.api.DefaultPubSubMessage;
 import com.linkedin.venice.pubsub.api.PubSubConsumerAdapter;
 import com.linkedin.venice.pubsub.api.PubSubMessageDeserializer;
@@ -604,6 +605,8 @@ public abstract class StoreIngestionTaskTest {
         .when(mockSchemaRepo)
         .getReplicationMetadataSchema(storeNameWithoutVersionInfo, EXISTING_SCHEMA_ID, REPLICATION_METADATA_VERSION_ID);
 
+    doReturn(new SchemaEntry(1, STRING_SCHEMA)).when(mockSchemaRepo).getKeySchema(any());
+
     setDefaultStoreVersionStateSupplier();
 
     KafkaConsumerServiceStats regionStats = mock(KafkaConsumerServiceStats.class);
@@ -701,6 +704,7 @@ public abstract class StoreIngestionTaskTest {
     private Consumer<VeniceStoreVersionConfig> storeVersionConfigOverride = storeVersionConfigOverride -> {};
     private DaVinciRecordTransformerConfig recordTransformerConfig = null;
     private OffsetRecord offsetRecord = null;
+    private boolean isDaVinci = false;
 
     public StoreIngestionTaskTestConfig(Set<Integer> partitions, Runnable assertions, AAConfig aaConfig) {
       this.partitions = partitions;
@@ -820,6 +824,15 @@ public abstract class StoreIngestionTaskTest {
       this.offsetRecord = offsetRecord;
       return this;
     }
+
+    public boolean isDaVinci() {
+      return isDaVinci;
+    }
+
+    public StoreIngestionTaskTestConfig setDaVinci(boolean daVinci) {
+      isDaVinci = daVinci;
+      return this;
+    }
   }
 
   private void runTest(StoreIngestionTaskTestConfig config) throws Exception {
@@ -837,7 +850,8 @@ public abstract class StoreIngestionTaskTest {
         config.getExtraServerProperties(),
         config.getStoreVersionConfigOverride(),
         config.getRecordTransformerConfig(),
-        config.getOffsetRecord());
+        config.getOffsetRecord(),
+        config.isDaVinci());
   }
 
   /**
@@ -872,7 +886,8 @@ public abstract class StoreIngestionTaskTest {
       Map<String, Object> extraServerProperties,
       Consumer<VeniceStoreVersionConfig> storeVersionConfigOverride,
       DaVinciRecordTransformerConfig recordTransformerConfig,
-      OffsetRecord offsetRecord) throws Exception {
+      OffsetRecord offsetRecord,
+      boolean isDaVinci) throws Exception {
 
     int partitionCount = PARTITION_COUNT;
     VenicePartitioner partitioner = getVenicePartitioner(); // Only get base venice partitioner
@@ -901,7 +916,7 @@ public abstract class StoreIngestionTaskTest {
         false,
         recordTransformerConfig,
         offsetRecord,
-        this.mockStorageService).build();
+        this.mockStorageService).setIsDaVinciClient(isDaVinci).build();
 
     Properties kafkaProps = new Properties();
     kafkaProps.put(KAFKA_BOOTSTRAP_SERVERS, inMemoryLocalKafkaBroker.getPubSubBrokerAddress());
@@ -1032,6 +1047,9 @@ public abstract class StoreIngestionTaskTest {
     doReturn(aaConfig == AA_ON).when(mockStore).isActiveActiveReplicationEnabled();
     version.setRmdVersionId(REPLICATION_METADATA_VERSION_ID);
 
+    // Enbable URN compression and this won't be enabled unless the server-level config is enabled in DaVinci.
+    version.setKeyUrnCompressionEnabled(true);
+
     doReturn(version).when(mockStore).getVersion(anyInt());
     doReturn(mockStore).when(mockMetadataRepo).getStoreOrThrow(storeNameWithoutVersionInfo);
     doReturn(mockStore).when(mockMetadataRepo).getStore(storeNameWithoutVersionInfo);
@@ -1048,21 +1066,20 @@ public abstract class StoreIngestionTaskTest {
       DaVinciRecordTransformerConfig recordTransformerConfig,
       OffsetRecord optionalOffsetRecord,
       StorageService storageService) {
-    StorageEngine storageEngineToUse;
+    DelegatingStorageEngine storageEngineToUse;
     if (recordTransformerConfig != null && recordTransformerConfig.getRecordTransformerFunction() != null) {
       LOGGER.info("Storage engine to use is the mockAbstractStorageEngine");
-      storageEngineToUse = this.mockAbstractStorageEngine;
+      storageEngineToUse = new DelegatingStorageEngine(this.mockAbstractStorageEngine);
 
       AbstractStorageIterator iterator = mock(AbstractStorageIterator.class);
       when(iterator.isValid()).thenReturn(true).thenReturn(false);
       when(iterator.key()).thenReturn("mockKey".getBytes());
       when(iterator.value()).thenReturn("mockValue".getBytes());
       when(this.mockAbstractStorageEngine.getIterator(anyInt())).thenReturn(iterator);
-
     } else {
       this.mockDeepCopyStorageEngine = spy(new DeepCopyStorageEngine(this.mockAbstractStorageEngine));
       LOGGER.info("Storage engine to use is the mockDeepCopyStorageEngine");
-      storageEngineToUse = this.mockDeepCopyStorageEngine;
+      storageEngineToUse = new DelegatingStorageEngine(this.mockDeepCopyStorageEngine);
     }
     assertNotNull(
         storageEngineToUse,
@@ -1477,9 +1494,8 @@ public abstract class StoreIngestionTaskTest {
       verifyPut(aaConfig, true);
       verifyDelete(aaConfig, true, false);
       // Verify it commits the offset to Offset Manager
-      long currentOffset = deleteProduceResult.getOffset();
       OffsetRecord expectedOffsetRecordForDeleteMessage =
-          getOffsetRecord(InMemoryPubSubPosition.of(currentOffset), Optional.empty());
+          getOffsetRecord(deleteProduceResult.getPubSubPosition(), Optional.empty());
       verify(mockStorageMetadataService, timeout(TEST_TIMEOUT_MS))
           .put(topic, PARTITION_FOO, expectedOffsetRecordForDeleteMessage);
 
@@ -1544,6 +1560,48 @@ public abstract class StoreIngestionTaskTest {
     runTest(config);
   }
 
+  @Test(dataProviderClass = DataProviderUtils.class, dataProvider = "True-and-False")
+  public void testKeyUrnCompression(boolean enableKeyUrnCompression) throws Exception {
+    Map<String, Object> extraProps = new HashMap<>();
+    byte[] urnKey =
+        FastSerializerDeserializerFactory.getFastAvroGenericSerializer(STRING_SCHEMA).serialize("urn:li:record:123");
+    int partition = new SimplePartitioner().getPartitionId(urnKey, PARTITION_COUNT);
+    extraProps.put(KEY_URN_COMPRESSION_ENABLED, enableKeyUrnCompression);
+
+    HybridStoreConfig hybridStoreConfig = new HybridStoreConfigImpl(
+        -1,
+        100,
+        HybridStoreConfigImpl.DEFAULT_HYBRID_TIME_LAG_THRESHOLD,
+        BufferReplayPolicy.REWIND_FROM_EOP);
+
+    VeniceWriter vtWriter = getVeniceWriter(new MockInMemoryProducerAdapter(inMemoryLocalKafkaBroker));
+    vtWriter.broadcastStartOfPush(Collections.emptyMap());
+    vtWriter.put(urnKey, putValue, EXISTING_SCHEMA_ID).get();
+
+    vtWriter.broadcastEndOfPush(Collections.emptyMap());
+    // Write more messages after EOP
+    vtWriter.put(urnKey, putValue, EXISTING_SCHEMA_ID).get();
+
+    isCurrentVersion = () -> true;
+
+    // Make sure the internal lag measurement won't fail.
+    doReturn(InMemoryPubSubPosition.of(0)).when(mockTopicManager).getLatestPositionCached(pubSubTopic, partition);
+
+    StoreIngestionTaskTestConfig config = new StoreIngestionTaskTestConfig(Utils.setOf(partition), () -> {
+      if (!enableKeyUrnCompression) {
+        verify(mockAbstractStorageEngine, timeout(TEST_TIMEOUT_MS).times(2))
+            .put(partition, urnKey, ByteBuffer.wrap(ValueRecord.create(SCHEMA_ID, putValue).serialize()));
+      } else {
+        verify(mockAbstractStorageEngine, timeout(TEST_TIMEOUT_MS).atLeastOnce())
+            .put(eq(partition), any(), any(ByteBuffer.class));
+        verify(mockAbstractStorageEngine, never())
+            .put(partition, urnKey, ByteBuffer.wrap(ValueRecord.create(SCHEMA_ID, putValue).serialize()));
+      }
+    }, AA_OFF);
+    config.setHybridStoreConfig(Optional.of(hybridStoreConfig)).setExtraServerProperties(extraProps).setDaVinci(true);
+    runTest(config);
+  }
+
   @Test(dataProvider = "aaConfigProvider")
   public void testMissingMessagesForTopicWithLogCompactionEnabled(AAConfig aaConfig) throws Exception {
     // enable log compaction
@@ -1586,9 +1644,8 @@ public abstract class StoreIngestionTaskTest {
           .put(PARTITION_FOO, putKeyFoo2, ByteBuffer.wrap(ValueRecord.create(SCHEMA_ID, putValue).serialize()));
 
       // Verify it commits the offset to Offset Manager
-      long currentOffset = putMetadata4.getOffset();
       OffsetRecord expectedOffsetRecordForLastMessage =
-          getOffsetRecord(InMemoryPubSubPosition.of(currentOffset), Optional.empty());
+          getOffsetRecord(putMetadata4.getPubSubPosition(), Optional.empty());
       verify(mockStorageMetadataService, timeout(TEST_TIMEOUT_MS))
           .put(topic, PARTITION_FOO, expectedOffsetRecordForLastMessage);
     }, aaConfig);
@@ -2628,15 +2685,17 @@ public abstract class StoreIngestionTaskTest {
       verifyDelete(aaConfig, false, true);
 
       // Verify it commits the offset to Offset Manager after receiving EOP control message
-      OffsetRecord expectedOffsetRecordForDeleteMessage = getOffsetRecord(deleteMetadata.getOffset() + 1, true);
+      OffsetRecord expectedOffsetRecordForDeleteMessage =
+          getOffsetRecord(deleteMetadata.getPubSubPosition().getNumericOffset() + 1, true);
       verify(mockStorageMetadataService, timeout(TEST_TIMEOUT_MS))
           .put(topic, PARTITION_FOO, expectedOffsetRecordForDeleteMessage);
       // Deferred write is not going to commit offset for every message, but will commit offset for every control
       // message
       // The following verification is for START_OF_PUSH control message
-      long currentOffset = putMetadata.getOffset() - 1;
+      InMemoryPubSubPosition currentPosition =
+          ((InMemoryPubSubPosition) putMetadata.getPubSubPosition()).getPreviousPosition();
       verify(mockStorageMetadataService, times(1))
-          .put(topic, PARTITION_FOO, getOffsetRecord(InMemoryPubSubPosition.of(currentOffset), Optional.empty()));
+          .put(topic, PARTITION_FOO, getOffsetRecord(currentPosition, Optional.empty()));
       // Check database mode switches from deferred-write to transactional after EOP control message
       StoragePartitionConfig deferredWritePartitionConfig = new StoragePartitionConfig(topic, PARTITION_FOO);
       deferredWritePartitionConfig.setDeferredWrite(true);
@@ -2676,15 +2735,19 @@ public abstract class StoreIngestionTaskTest {
       verify(mockStorageMetadataService, timeout(TEST_TIMEOUT_MS)).getLastOffset(topic, PARTITION_FOO);
 
       // Verify it commits the offset to Offset Manager after receiving EOP control message
-      OffsetRecord expectedOffsetRecordForDeleteMessage = getOffsetRecord(deleteMetadata.getOffset() + 1, true);
+      InMemoryPubSubPosition nextToDeletePosition =
+          ((InMemoryPubSubPosition) deleteMetadata.getPubSubPosition()).getNextPosition();
+      OffsetRecord expectedOffsetRecordForDeleteMessage =
+          getOffsetRecord(nextToDeletePosition, Optional.of(InMemoryPubSubPosition.of(1000L)));
       verify(mockStorageMetadataService, timeout(TEST_TIMEOUT_MS))
           .put(topic, PARTITION_FOO, expectedOffsetRecordForDeleteMessage);
       // Deferred write is not going to commit offset for every message, but will commit offset for every control
       // message
       // The following verification is for START_OF_PUSH control message
-      long currentOffset = putMetadata.getOffset() - 1;
+      InMemoryPubSubPosition currentPosition =
+          ((InMemoryPubSubPosition) putMetadata.getPubSubPosition()).getPreviousPosition();
       verify(mockStorageMetadataService, times(1))
-          .put(topic, PARTITION_FOO, getOffsetRecord(InMemoryPubSubPosition.of(currentOffset), Optional.empty()));
+          .put(topic, PARTITION_FOO, getOffsetRecord(currentPosition, Optional.empty()));
       // Check database mode switches from deferred-write to transactional after EOP control message
       StoragePartitionConfig deferredWritePartitionConfig = new StoragePartitionConfig(topic, PARTITION_FOO);
       boolean deferredWrite;
@@ -3937,7 +4000,8 @@ public abstract class StoreIngestionTaskTest {
         PARTITION_FOO,
         mockOffsetRecord,
         pubSubContext,
-        true);
+        true,
+        Schema.create(Schema.Type.STRING));
 
     long producerTimestamp = System.currentTimeMillis();
     LeaderMetadataWrapper mockLeaderMetadataWrapper = mock(LeaderMetadataWrapper.class);
@@ -4235,8 +4299,13 @@ public abstract class StoreIngestionTaskTest {
 
     OffsetRecord offsetRecord = mock(OffsetRecord.class);
     doReturn(pubSubTopicRepository.getTopic(versionTopicName)).when(offsetRecord).getLeaderTopic(any());
-    PartitionConsumptionState partitionConsumptionState =
-        new PartitionConsumptionState(Utils.getReplicaId(versionTopicName, 0), 0, offsetRecord, pubSubContext, false);
+    PartitionConsumptionState partitionConsumptionState = new PartitionConsumptionState(
+        Utils.getReplicaId(versionTopicName, 0),
+        0,
+        offsetRecord,
+        pubSubContext,
+        false,
+        Schema.create(Schema.Type.STRING));
 
     PubSubPosition localVersionTopicOffset = InMemoryPubSubPosition.of(100L);
     PubSubPosition remoteVersionTopicOffset = InMemoryPubSubPosition.of(200L);
@@ -4594,8 +4663,8 @@ public abstract class StoreIngestionTaskTest {
         OffsetRecord offsetRecord = pcs.getOffsetRecord();
         assertNotNull(offsetRecord);
         Assert.assertEquals(
-            PubSubUtil.comparePubSubPositions(offsetRecord.getCheckpointedLocalVtPosition(), p0),
-            0,
+            offsetRecord.getCheckpointedLocalVtPosition().getNumericOffset(),
+            p0.getNumericOffset(),
             "offsetRecord.getCheckpointedLocalVtPosition() for PARTITION_FOO is expected to be zero!");
       }
 
@@ -4607,14 +4676,14 @@ public abstract class StoreIngestionTaskTest {
       assertNotNull(offsetRecord);
       Assert.assertEquals(pcs.getLatestProcessedVtPosition(), p2); // PCS updated
       // offsetRecord hasn't been updated yet
-      Assert.assertEquals(PubSubUtil.comparePubSubPositions(offsetRecord.getCheckpointedLocalVtPosition(), p0), 0);
+      Assert.assertEquals(offsetRecord.getCheckpointedLocalVtPosition().getNumericOffset(), p0.getNumericOffset());
       storeIngestionTaskUnderTest.close();
 
       // Verify the OffsetRecord is synced up with pcs and get persisted only once during shutdown
       verify(mockStorageMetadataService, timeout(TEST_TIMEOUT_MS).times(1)).put(eq(topic), eq(PARTITION_FOO), any());
       Assert.assertEquals(
-          PubSubUtil.comparePubSubPositions(offsetRecord.getCheckpointedLocalVtPosition(), p2),
-          0,
+          offsetRecord.getCheckpointedLocalVtPosition().getNumericOffset(),
+          p2.getNumericOffset(),
           "offsetRecord.getCheckpointedLocalVtPosition() for PARTITION_FOO is expected to be 2!");
 
       // Verify that the underlying storage engine sync function is invoked.
@@ -4875,8 +4944,13 @@ public abstract class StoreIngestionTaskTest {
         null);
     OffsetRecord offsetRecord = mock(OffsetRecord.class);
     doReturn(pubSubTopic).when(offsetRecord).getLeaderTopic(any());
-    PartitionConsumptionState partitionConsumptionState =
-        new PartitionConsumptionState(Utils.getReplicaId(pubSubTopic, 0), 0, offsetRecord, pubSubContext, false);
+    PartitionConsumptionState partitionConsumptionState = new PartitionConsumptionState(
+        Utils.getReplicaId(pubSubTopic, 0),
+        0,
+        offsetRecord,
+        pubSubContext,
+        false,
+        Schema.create(Schema.Type.STRING));
 
     storeIngestionTaskUnderTest.updateLeaderTopicOnFollower(partitionConsumptionState);
     storeIngestionTaskUnderTest.startConsumingAsLeader(partitionConsumptionState);
@@ -5853,12 +5927,10 @@ public abstract class StoreIngestionTaskTest {
     doCallRealMethod().when(ingestionTask).loadGlobalRtDiv(anyInt(), anyString());
     doReturn(true).when(ingestionTask).isGlobalRtDivEnabled();
 
-    GenericRecord valueRecord = mock(GenericRecord.class);
     InMemoryPubSubPosition p1 = InMemoryPubSubPosition.of(11);
     GlobalRtDivState globalRtDivState =
         new GlobalRtDivState("localhost:1234", Collections.emptyMap(), p1.toWireFormatBuffer());
-    doReturn(globalRtDivState).when(valueRecord).get(any());
-    doReturn(valueRecord).when(ingestionTask).readStoredValueRecord(any(), any(), anyInt(), any(), any());
+    doReturn(globalRtDivState).when(ingestionTask).readGlobalRtDivState(any(), anyInt(), any(), any());
     DataIntegrityValidator consumerDiv = mock(DataIntegrityValidator.class);
     doReturn(consumerDiv).when(ingestionTask).getConsumerDiv();
     Int2ObjectMap<String> brokerIdToUrlMap = new Int2ObjectOpenHashMap<>();
@@ -5874,6 +5946,7 @@ public abstract class StoreIngestionTaskTest {
     doReturn(pubSubContext).when(ingestionTask).getPubSubContext();
 
     ingestionTask.restoreProducerStatesForLeaderConsumption(PARTITION_FOO);
+    verify(consumerDiv, times(1)).clearRtSegments(eq(PARTITION_FOO));
     verify(ingestionTask, times(1)).loadGlobalRtDiv(eq(PARTITION_FOO));
     brokerIdToUrlMap.forEach((brokerId, url) -> {
       verify(ingestionTask, times(1)).loadGlobalRtDiv(eq(PARTITION_FOO), eq(url));

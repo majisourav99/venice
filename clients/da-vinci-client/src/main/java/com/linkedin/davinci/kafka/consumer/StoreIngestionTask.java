@@ -41,6 +41,7 @@ import com.linkedin.davinci.stats.HostLevelIngestionStats;
 import com.linkedin.davinci.stats.ingestion.heartbeat.HeartbeatMonitoringService;
 import com.linkedin.davinci.storage.StorageMetadataService;
 import com.linkedin.davinci.storage.StorageService;
+import com.linkedin.davinci.store.DelegatingStorageEngine;
 import com.linkedin.davinci.store.StorageEngine;
 import com.linkedin.davinci.store.StoragePartitionAdjustmentTrigger;
 import com.linkedin.davinci.store.StoragePartitionConfig;
@@ -404,6 +405,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
   protected final String hostName;
   private boolean skipAfterBatchPushUnsubEnabled = false;
   private final List<AutoCloseable> thingsToClose = new ArrayList<>();
+  private final Version version;
 
   public StoreIngestionTask(
       StorageService storageService,
@@ -419,6 +421,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
       InternalDaVinciRecordTransformerConfig internalRecordTransformerConfig,
       Queue<VeniceNotifier> notifiers,
       Lazy<ZKHelixAdmin> zkHelixAdmin) {
+    this.version = version;
     this.storeVersionConfig = storeVersionConfig;
     this.readCycleDelayMs = storeVersionConfig.getKafkaReadCycleDelayMs();
     this.emptyPollSleepMs = storeVersionConfig.getKafkaEmptyPollSleepMs();
@@ -494,6 +497,20 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
         storageService.getRefCountedStorageEngine(storeVersionName);
     this.thingsToClose.add(refCountedStorageEngine);
     this.storageEngine = Objects.requireNonNull(refCountedStorageEngine.get());
+    if ((this.storageEngine instanceof DelegatingStorageEngine)) {
+      DelegatingStorageEngine delegatingStorageEngine = (DelegatingStorageEngine) this.storageEngine;
+      delegatingStorageEngine.setKeyDictCompressionFunction(p -> {
+        PartitionConsumptionState pcs = partitionConsumptionStateMap.get(p);
+        if (pcs == null) {
+          throw new VeniceException("Partition " + p + " not found in partitionConsumptionStateMap");
+        }
+        return pcs.getKeyDictCompressor();
+      });
+    } else {
+      throw new VeniceException(
+          "Unexpected storage engine type: " + this.storageEngine.getClass() + " for store version: " + storeVersionName
+              + ", expected: DelegatingStorageEngine");
+    }
 
     this.serverConfig = builder.getServerConfig();
     this.defaultReadyToServeChecker = getDefaultReadyToServeChecker();
@@ -551,6 +568,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
 
       DaVinciRecordTransformer clientRecordTransformer = recordTransformerConfig.getRecordTransformerFunction()
           .apply(
+              storeName,
               versionNumber,
               keySchema,
               this.recordTransformerInputValueSchema,
@@ -1818,7 +1836,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
   }
 
   /**
-   * This version of the method syncs using a PartitionTracker object which contains the vtSegments and LCVO
+   * This version of the method syncs using a PartitionTracker object which contains the vtSegments and LCVP
    */
   protected void updateAndSyncOffsetFromSnapshot(PartitionTracker vtDivSnapshot, PubSubTopicPartition topicPartition) {
     PartitionConsumptionState pcs = getPartitionConsumptionState(topicPartition.getPartitionNumber());
@@ -2166,7 +2184,9 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
             partition,
             offsetRecord,
             pubSubContext,
-            hybridStoreConfig.isPresent());
+            hybridStoreConfig.isPresent(),
+            schemaRepository.getKeySchema(storeName).getSchema());
+
         newPartitionConsumptionState.setCurrentVersionSupplier(isCurrentVersion);
 
         boolean isFutureVersionReady = isFutureVersionReady(kafkaVersionTopic, storeRepository);
@@ -2207,6 +2227,10 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
             localVtSubscribePosition,
             localKafkaServer);
         LOGGER.info("Subscribed to: {} position: {}", topicPartition, localVtSubscribePosition);
+        if (isGlobalRtDivEnabled()) {
+          // TODO: remove. this is a temporary log for debugging while the feature is in its infancy
+          LOGGER.info("event=globalRtDiv Subscribed to: {} position: {}", topicPartition, localVtSubscribePosition);
+        }
         storageUtilizationManager.initPartition(partition);
         break;
       case UNSUBSCRIBE:
@@ -2329,7 +2353,8 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
           partition,
           new OffsetRecord(partitionStateSerializer),
           pubSubContext,
-          hybridStoreConfig.isPresent());
+          hybridStoreConfig.isPresent(),
+          schemaRepository.getKeySchema(storeName).getSchema());
       consumptionState.setCurrentVersionSupplier(isCurrentVersion);
       partitionConsumptionStateMap.put(partition, consumptionState);
       storageUtilizationManager.initPartition(partition);
@@ -2443,7 +2468,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
 
     // Just a sanity check for something that shouldn't ever happen. Skip it and log a warning.
     if (record.getKey().isGlobalRtDiv() && record.getTopic().isRealTime()) {
-      LOGGER.warn("Skipping Global RT DIV message from realtime topic partition: {}", record.getTopicPartition());
+      LOGGER.warn("Skipping Global RT DIV message from realtime topic-partition: {}", record.getTopicPartition());
       return false;
     }
 
@@ -2739,6 +2764,8 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
     OffsetRecord offsetRecord = pcs.getOffsetRecord();
     // Check-pointing info required by the underlying storage engine
     offsetRecord.setDatabaseInfo(dbCheckpointingInfoReference.get());
+    // Update key urn compression dictionary
+    offsetRecord.setKeyUrnCompressionDict(pcs.getKeyUrnCompressionDict());
     storageMetadataService.put(this.kafkaVersionTopic, partition, offsetRecord);
     pcs.resetProcessedRecordSizeSinceLastSync();
     String msg = "Offset synced for replica: " + pcs.getReplicaId() + " - localVtOffset: {}";
@@ -3022,6 +3049,16 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
     ingestionNotificationDispatcher.reportStarted(partitionConsumptionState);
     beginBatchWrite(persistedStoreVersionState.sorted, partitionConsumptionState);
     partitionConsumptionState.setStartOfPushTimestamp(startOfPushKME.producerMetadata.messageTimestamp);
+
+    /**
+     * Check whether we should enable key urn compression or not.
+     * This should only be called when handling StartOfPush Control Message, otherwise the dictionary
+     * to be built won't cover all the keys.
+     */
+    if (isDaVinciClient() && version.isKeyUrnCompressionEnabled() && serverConfig.isKeyUrnCompressionEnabled()) {
+      List<String> urnFields = version.getKeyUrnFields();
+      partitionConsumptionState.enableKeyUrnCompressionUponStartOfPush(urnFields);
+    }
   }
 
   protected void processEndOfPush(
@@ -3393,7 +3430,6 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
       DefaultPubSubMessage consumerRecord,
       PartitionConsumptionState partitionConsumptionState,
       LeaderProducedRecordContext leaderProducedRecordContext) {
-    boolean endOfPushReceived = partitionConsumptionState.isEndOfPushReceived();
     try {
       if (leaderProducedRecordContext == null || leaderProducedRecordContext.hasCorrespondingUpstreamMessage()) {
         /**
@@ -3411,7 +3447,6 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
             PartitionTracker.VERSION_TOPIC,
             this.drainerDiv,
             consumerRecord,
-            endOfPushReceived,
             partitionConsumptionState,
             /**
              * N.B.: For A/A enabled stores, the drainer DIV is useless, since upstream of here we may have filtered
@@ -3425,7 +3460,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
         versionedDIVStats.recordSuccessMsg(storeName, versionNumber);
       }
     } catch (FatalDataValidationException fatalException) {
-      if (!endOfPushReceived) {
+      if (!partitionConsumptionState.isEndOfPushReceived()) {
         throw fatalException;
       } else {
         LOGGER.warn(
@@ -3458,15 +3493,13 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
       PartitionTracker.TopicType type,
       DataIntegrityValidator validator,
       DefaultPubSubMessage consumerRecord,
-      boolean endOfPushReceived,
       PartitionConsumptionState partitionConsumptionState,
       boolean tolerateMissingMessagesForRealTimeTopic) {
     KafkaKey key = consumerRecord.getKey();
     if (key.isControlMessage() && Arrays.equals(KafkaKey.HEART_BEAT.getKey(), key.getKey())) {
       return; // Skip validation for ingestion heartbeat records.
-    } else if (key.isGlobalRtDiv()) {
-      return; // Skip validation for Global RT DIV messages.
     }
+    // Global RT DIV messages are not skipped. See validateAndFilterOutDuplicateMessagesFromLeaderTopic()
 
     Lazy<Boolean> tolerateMissingMsgs = Lazy.of(() -> {
       PubSubTopic pubSubTopic = consumerRecord.getTopic();
@@ -3503,13 +3536,14 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
     });
 
     try {
-      validator.validateMessage(type, consumerRecord, endOfPushReceived, tolerateMissingMsgs);
+      validator
+          .validateMessage(type, consumerRecord, partitionConsumptionState.isEndOfPushReceived(), tolerateMissingMsgs);
     } catch (FatalDataValidationException fatalException) {
       divErrorMetricCallback.accept(fatalException);
       /**
        * If DIV errors happens after EOP is received, we will not error out the replica.
        */
-      if (!endOfPushReceived) {
+      if (!partitionConsumptionState.isEndOfPushReceived()) {
         throw fatalException;
       }
 
@@ -4759,16 +4793,17 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
   }
 
   boolean isGlobalRtDivEnabled() {
-    return isGlobalRtDivEnabled; // mainly for unit test mocks
+    return isGlobalRtDivEnabled;
   }
 
   /** When Global RT DIV is enabled the ConsumptionTask's DIV is exclusively used to validate data integrity. */
-  DataIntegrityValidator getDataIntegrityValidator() {
+  @VisibleForTesting
+  public DataIntegrityValidator getDataIntegrityValidator() {
     return (isGlobalRtDivEnabled()) ? consumerDiv : drainerDiv;
   }
 
   /**
-   * When Global RT DIV is enabled, the latest consumed VT offset (LCVO) should be used during subscription.
+   * When Global RT DIV is enabled, the latest consumed VT position (LCVP) should be used during subscription.
    * Otherwise, the drainer's latest processed VT offset is traditionally used.
    */
   PubSubPosition getLocalVtSubscribePosition(PartitionConsumptionState pcs) {

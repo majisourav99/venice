@@ -38,8 +38,8 @@ import org.apache.logging.log4j.Logger;
 
 
 public class ControllerClientBackedSystemSchemaInitializer implements Closeable {
+  public static final String DEFAULT_KEY_SCHEMA_STR = "\"int\"";
   private static final Logger LOGGER = LogManager.getLogger(ControllerClientBackedSystemSchemaInitializer.class);
-  private static final String DEFAULT_KEY_SCHEMA_STR = "\"int\"";
   /**
    * Current leader controller might transit from leader to standby, clear cached store repository, and fail to handle
    * schema requests. Leverage 20 retries (38 seconds) to cover the leader->standby period so that a later retry will be
@@ -96,13 +96,6 @@ public class ControllerClientBackedSystemSchemaInitializer implements Closeable 
               controllerD2ServiceName,
               clusterName,
               d2Client.get(),
-              enforceSslOnly ? sslFactory : Optional.empty());
-        } else if (!d2ZkHost.isEmpty()) {
-          // TODO: removing this once we verified passing D2Client without issue.
-          controllerClient = new D2ControllerClient(
-              controllerD2ServiceName,
-              clusterName,
-              d2ZkHost,
               enforceSslOnly ? sslFactory : Optional.empty());
         } else {
           throw new VeniceException(
