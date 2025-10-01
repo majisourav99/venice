@@ -67,7 +67,7 @@ import com.linkedin.venice.pubsub.api.PubSubTopic;
 import com.linkedin.venice.pubsub.manager.TopicManager;
 import com.linkedin.venice.pushmonitor.ExecutionStatus;
 import com.linkedin.venice.pushstatushelper.PushStatusStoreWriter;
-import com.linkedin.venice.stats.dimensions.RepushStoreTriggerSource;
+import com.linkedin.venice.stats.dimensions.StoreRepushTriggerSource;
 import com.linkedin.venice.stats.dimensions.VeniceResponseStatusCategory;
 import com.linkedin.venice.system.store.MetaStoreWriter;
 import com.linkedin.venice.utils.DataProviderUtils;
@@ -1275,6 +1275,10 @@ public class TestVeniceHelixAdmin {
     doReturn(repo).when(mockClusterResources).getCustomizedViewRepository();
     doReturn(mockClusterResources).when(mockVeniceHelixAdmin).getHelixVeniceClusterResources(clusterName);
 
+    VeniceVersionLifecycleEventManager mockVersionLifecycleEventManager =
+        mock(VeniceVersionLifecycleEventManager.class);
+    doReturn(mockVersionLifecycleEventManager).when(mockClusterResources).getVeniceVersionLifecycleEventManager();
+
     RealTimeTopicSwitcher mockTopicSwitcher = mock(RealTimeTopicSwitcher.class);
     doReturn(mockTopicSwitcher).when(mockVeniceHelixAdmin).getRealTimeTopicSwitcher();
     doNothing().when(mockTopicSwitcher).transmitVersionSwapMessage(any(), anyInt(), anyInt());
@@ -1282,7 +1286,7 @@ public class TestVeniceHelixAdmin {
     // intercept the lambda passed to storeMetadataUpdate and run it on our mockStore
     doAnswer(inv -> {
       VeniceHelixAdmin.StoreMetadataOperation updater = inv.getArgument(2);
-      updater.update(mockStore);
+      updater.update(mockStore, mockClusterResources);
       return null;
     }).when(mockVeniceHelixAdmin).storeMetadataUpdate(eq(clusterName), eq(storeName), any());
     doCallRealMethod().when(mockVeniceHelixAdmin).rollForwardToFutureVersion(anyString(), anyString(), anyString());
@@ -1323,9 +1327,9 @@ public class TestVeniceHelixAdmin {
     RepushJobRequest mockRequest = mock(RepushJobRequest.class);
     when(mockRequest.getClusterName()).thenReturn(clusterName);
     when(mockRequest.getStoreName()).thenReturn(storeName);
-    RepushStoreTriggerSource repushStoreTriggerSource =
-        manualRepush ? RepushStoreTriggerSource.MANUAL : RepushStoreTriggerSource.SCHEDULED;
-    when(mockRequest.getTriggerSource()).thenReturn(repushStoreTriggerSource);
+    StoreRepushTriggerSource storeRepushTriggerSource =
+        manualRepush ? StoreRepushTriggerSource.MANUAL : StoreRepushTriggerSource.SCHEDULED_FOR_LOG_COMPACTION;
+    when(mockRequest.getTriggerSource()).thenReturn(storeRepushTriggerSource);
 
     RepushJobResponse mockRepushJobResponse = mock(RepushJobResponse.class);
     when(mockRepushJobResponse.isError()).thenReturn(responseFailure);
@@ -1355,7 +1359,7 @@ public class TestVeniceHelixAdmin {
         ? VeniceResponseStatusCategory.FAIL
         : VeniceResponseStatusCategory.SUCCESS;
     verify(mockLogCompactionStats, Mockito.times(1))
-        .recordRepushStoreCall(storeName, repushStoreTriggerSource, expectedResponseCategory);
+        .recordRepushStoreCall(storeName, storeRepushTriggerSource, expectedResponseCategory);
   }
 
   @Test
