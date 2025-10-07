@@ -64,11 +64,22 @@ public class ChangelogClientConfig<T extends SpecificRecord> {
   private boolean useRequestBasedMetadataRepository = false;
 
   /**
+   * If non-null, VeniceChangelogConsumer will subscribe to a specific version of a Venice store.
+   * It is only intended for internal use.
+   */
+  private Integer storeVersion;
+
+  /**
+   * If true, BootstrappingVeniceChangelogConsumer will be used and all records will be persisted onto disk.
+   * If false, VeniceChangelogConsumer will be used and records won't be persisted onto disk.
+   */
+  private boolean isStateful = false;
+
+  /**
    * Internal fields derived from the consumer properties.
    * These are refreshed each time a new set of consumer properties is applied.
    */
   private PubSubConsumerAdapterFactory<? extends PubSubConsumerAdapter> pubSubConsumerAdapterFactory;
-  private PubSubMessageDeserializer pubSubMessageDeserializer;
   private PubSubContext pubSubContext;
 
   public ChangelogClientConfig(String storeName) {
@@ -286,6 +297,36 @@ public class ChangelogClientConfig<T extends SpecificRecord> {
     return skipFailedToAssembleRecords;
   }
 
+  /**
+   * Sets {@link #storeVersion}
+   */
+  public ChangelogClientConfig setStoreVersion(Integer storeVersion) {
+    this.storeVersion = storeVersion;
+    return this;
+  }
+
+  /**
+   * @return {@link #storeVersion}
+   */
+  public Integer getStoreVersion() {
+    return this.storeVersion;
+  }
+
+  /**
+   * Sets {@link #isStateful}
+   */
+  public ChangelogClientConfig setIsStateful(boolean isStateful) {
+    this.isStateful = isStateful;
+    return this;
+  }
+
+  /**
+   * @return {@link #storeVersion}
+   */
+  public boolean isStateful() {
+    return this.isStateful;
+  }
+
   public static <V extends SpecificRecord> ChangelogClientConfig<V> cloneConfig(ChangelogClientConfig<V> config) {
     ChangelogClientConfig<V> newConfig = new ChangelogClientConfig<V>().setStoreName(config.getStoreName())
         .setLocalD2ZkHosts(config.getLocalD2ZkHosts())
@@ -309,7 +350,11 @@ public class ChangelogClientConfig<T extends SpecificRecord> {
         .setSeekThreadPoolSize(config.getSeekThreadPoolSize())
         .setShouldSkipFailedToAssembleRecords(config.shouldSkipFailedToAssembleRecords())
         .setUseRequestBasedMetadataRepository(config.isUseRequestBasedMetadataRepository())
-        .setInnerClientConfig(config.getInnerClientConfig());
+        .setInnerClientConfig(config.getInnerClientConfig())
+        // Store version should not be cloned
+        .setStoreVersion(null)
+        // Is stateful config should not be cloned
+        .setIsStateful(false);
     return newConfig;
   }
 
@@ -378,15 +423,10 @@ public class ChangelogClientConfig<T extends SpecificRecord> {
         .setPubSubTopicRepository(pubSubTopicRepository)
         .build();
     this.pubSubConsumerAdapterFactory = PubSubClientsFactory.createConsumerFactory(pubSubProperties);
-    this.pubSubMessageDeserializer = PubSubMessageDeserializer.createOptimizedDeserializer();
   }
 
   protected PubSubConsumerAdapterFactory<? extends PubSubConsumerAdapter> getPubSubConsumerAdapterFactory() {
     return pubSubConsumerAdapterFactory;
-  }
-
-  protected PubSubMessageDeserializer getPubSubMessageDeserializer() {
-    return pubSubMessageDeserializer;
   }
 
   protected PubSubContext getPubSubContext() {
