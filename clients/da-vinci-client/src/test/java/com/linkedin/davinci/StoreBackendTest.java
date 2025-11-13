@@ -253,7 +253,8 @@ public class StoreBackendTest {
         Optional.of(version1),
         Collections.emptyMap(),
         null,
-        Collections.emptyMap());
+        Collections.emptyMap(),
+        false);
     versionMap.get(version1.kafkaTopicName()).completePartition(partition);
     subscribeResult.get(3, TimeUnit.SECONDS);
     // Verify that subscribe selected the specified version as current.
@@ -288,7 +289,8 @@ public class StoreBackendTest {
         Optional.of(version1),
         Collections.emptyMap(),
         null,
-        Collections.emptyMap());
+        Collections.emptyMap(),
+        false);
     versionMap.get(version1.kafkaTopicName()).completePartition(partition);
     subscribeResult.get(3, TimeUnit.SECONDS);
 
