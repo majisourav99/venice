@@ -142,7 +142,7 @@ ext.libraries = [
     snappy: 'org.iq80.snappy:snappy:0.4',
     spark: 'com.sparkjava:spark-core:2.9.4', // Spark-Java Rest framework
     spotbugs: 'com.github.spotbugs:spotbugs:4.5.2',
-    tehuti: 'io.tehuti:tehuti:0.12.4',
+    tehuti: 'io.tehuti:tehuti:0.12.5',
     testcontainers: 'org.testcontainers:testcontainers:1.18.0',
     testng: 'org.testng:testng:6.14.3',
     tomcatAnnotations: 'org.apache.tomcat:annotations-api:6.0.53',
@@ -327,9 +327,9 @@ subprojects {
       // when actually using the new protocol. Example to pin KME to v12 when introducing v13:
       // project(':internal:venice-common').file('src/main/resources/avro/KafkaMessageEnvelope/v12', PathValidation.DIRECTORY)
       def versionOverrides = [
-          project(':internal:venice-common').file('src/main/resources/avro/KafkaMessageEnvelope/v12', PathValidation.DIRECTORY),
           project(':internal:venice-common').file('src/main/resources/avro/StoreMetaValue/v36', PathValidation.DIRECTORY),
-          project(':services:venice-controller').file('src/main/resources/avro/AdminOperation/v91', PathValidation.DIRECTORY)
+          project(':services:venice-controller').file('src/main/resources/avro/AdminOperation/v91', PathValidation.DIRECTORY),
+          project(':internal:venice-common').file('src/main/resources/avro/PartitionState/v19', PathValidation.DIRECTORY),
       ]
 
       def schemaDirs = [sourceDir]

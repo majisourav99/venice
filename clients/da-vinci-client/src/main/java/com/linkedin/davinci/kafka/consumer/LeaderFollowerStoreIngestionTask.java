@@ -7,7 +7,6 @@ import static com.linkedin.davinci.kafka.consumer.LeaderFollowerStateType.LEADER
 import static com.linkedin.davinci.kafka.consumer.LeaderFollowerStateType.PAUSE_TRANSITION_FROM_STANDBY_TO_LEADER;
 import static com.linkedin.davinci.kafka.consumer.LeaderFollowerStateType.STANDBY;
 import static com.linkedin.davinci.validation.PartitionTracker.TopicType.REALTIME_TOPIC_TYPE;
-import static com.linkedin.davinci.validation.PartitionTracker.TopicType.VERSION_TOPIC_TYPE;
 import static com.linkedin.venice.kafka.protocol.enums.ControlMessageType.END_OF_PUSH;
 import static com.linkedin.venice.kafka.protocol.enums.ControlMessageType.START_OF_SEGMENT;
 import static com.linkedin.venice.kafka.protocol.enums.MessageType.UPDATE;
@@ -910,9 +909,9 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
     long diff =
         topicManager.diffPosition(pcs.getReplicaTopicPartition(), localVtEndPosition, latestProcessedLocalVtPosition);
 
-    // diff <= 0 means end position was probably stale
+    // diff < 0 means end position was probably stale
     // Log using redundant-exception filter to trace edge conditions
-    if (diff <= 0) {
+    if (diff < 0) {
       String msg =
           "Negative diff between local VT end position: " + localVtEndPosition + " and latest processed VT position: "
               + latestProcessedLocalVtPosition + " for partition: " + pcs.getReplicaTopicPartition();
@@ -1449,7 +1448,8 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
       if (!isDaVinciClient) {
         // also update the leader topic position using the upstream position in LeaderMetadata
         PubSubPosition newUpstreamPosition = extractUpstreamPosition(consumerRecord);
-        if (!PubSubSymbolicPosition.EARLIEST.equals(newUpstreamPosition)) {
+        if (!PubSubSymbolicPosition.EARLIEST.equals(newUpstreamPosition)
+            && extractUpstreamClusterId(consumerRecord) != -1) {
           final String sourceKafkaUrl = sourceKafkaUrlSupplier.get();
           PubSubTopic upstreamTopic = offsetRecord.getLeaderTopic(pubSubTopicRepository);
           if (upstreamTopic == null) {
@@ -2336,14 +2336,15 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
     Iterator<DefaultPubSubMessage> iter = records.iterator();
     while (iter.hasNext()) {
       DefaultPubSubMessage record = iter.next();
-      boolean isRealTimeTopic = record.getTopicPartition().getPubSubTopic().isRealTime();
       try {
         /**
          * TODO: An improvement can be made to fail all future versions for fatal DIV exceptions after EOP.
          */
-        final TopicType topicType = (isGlobalRtDivEnabled())
-            ? TopicType.of(isRealTimeTopic ? REALTIME_TOPIC_TYPE : VERSION_TOPIC_TYPE, kafkaUrl)
-            : PartitionTracker.VERSION_TOPIC;
+        TopicType topicType = PartitionTracker.VERSION_TOPIC;
+        // shouldProduceToVersionTopic() ensures this is a LEADER that is consuming from RT or remote VT
+        if (isGlobalRtDivEnabled() && shouldProduceToVersionTopic(pcs)) {
+          topicType = TopicType.of(REALTIME_TOPIC_TYPE, kafkaUrl);
+        }
         validateMessage(topicType, consumerDiv, record, pcs, false);
         versionedDIVStats.recordSuccessMsg(storeName, versionNumber);
       } catch (FatalDataValidationException e) {
@@ -2671,6 +2672,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
                 beforeProcessingPerRecordTimestampNs);
             break;
           case TOPIC_SWITCH:
+            validateEndOfPushReceivedBeforeTopicSwitch(partitionConsumptionState, consumerRecord.getPosition());
             /**
              * For TOPIC_SWITCH message we should use -1 as consumedOffset. This will ensure that it does not update the
              * checkpointRtPosition in:
@@ -2770,7 +2772,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
         return true;
       }
     }
-    return shouldSyncOffset(pcs, consumerRecord, null);
+    return isNonSegmentControlMessage(consumerRecord, null);
   }
 
   /**
@@ -3437,7 +3439,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
     PartitionTracker rtDiv = consumerDiv.cloneRtProducerStates(partition, brokerUrl);
     Map<CharSequence, ProducerPartitionState> rtDivPartitionStates = rtDiv.getPartitionStates(realTimeTopicType);
 
-    // Create GlobalRtDivState (RT DIV + latest RT position) and serialize into a byte array. Try compression.
+    // Create GlobalRtDivState (RT DIV + LCRP) and serialize into a byte array. Try compression.
     final byte[] valueBytes = createGlobalRtDivValueBytes(previousMessage, brokerUrl, rtDivPartitionStates);
 
     // The callback onCompletionFunction sends the VT DIV + LCVP to the drainer after producing to VT successfully
@@ -3459,15 +3461,14 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
     readGlobalRtDivState(keyBytes, schemaId, topicPartition, valueManifestContainer);
 
     // TODO: remove. this is a temporary log for debugging while the feature is in its infancy
-    rtDivPartitionStates.forEach((producer, pps) -> {
-      LOGGER.info(
-          "event=globalRtDiv Sending Global RT DIV message for topic-partition: {} broker: {} producer: {}, valueSize: {} pps: {}",
-          topicPartition,
-          brokerUrl,
-          producer,
-          valueBytes.length,
-          pps);
-    });
+    LOGGER.info(
+        "event=globalRtDiv Sending Global RT DIV message for topic-partition: {} versionTopic: {} LCRP: {} broker: {} producerCount: {}, valueSize: {}",
+        topicPartition,
+        versionTopic,
+        previousMessage.getPosition(),
+        brokerUrl,
+        rtDivPartitionStates.size(),
+        valueBytes.length);
 
     // Produce to local VT for the Global RT DIV + latest RT position (GlobalRtDivState)
     // Internally, VeniceWriter.put() will schedule DELETEs for the old chunks in the old manifest after the new PUTs
@@ -3483,7 +3484,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
             null,
             valueManifestContainer.getManifest(),
             null,
-            false);
+            true);
 
     consumedBytesSinceLastSync.put(brokerUrl, 0L); // reset the timer for the next sync, since RT DIV was just synced
   }
@@ -3551,8 +3552,9 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
         beforeProcessingRecordTimestampNs);
 
     // After producing RT DIV to local VT, the VT DIV should be sent to the drainer to sync to the OffsetRecord
-    divCallback.setOnCompletionFunction(() -> {
+    divCallback.setOnCompletionFunction(produceResult -> {
       try {
+        vtDiv.updateLatestConsumedVtPosition(produceResult.getPubSubPosition()); // LCVP = produced position in local VT
         storeBufferService.execSyncOffsetFromSnapshotAsync(topicPartition, vtDiv, this);
       } catch (InterruptedException e) {
         LOGGER.error("Failed to sync VT DIV to OffsetRecord for replica: {}", topicPartition, e);
@@ -3591,6 +3593,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
           compressor.get(),
           manifestContainer);
     } catch (Exception e) {
+      // TODO: evaluate whether these logs can be set to debug
       LOGGER.error(
           "Unable to retrieve the stored value bytes for key: {}, topic-partition: {}",
           new String(keyBytes),
@@ -3600,6 +3603,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
     }
 
     if (valueBytes == null) {
+      // TODO: evaluate whether these logs can be set to debug
       LOGGER.warn(
           "No value found in the storage engine for key: {}, topic-partition: {}",
           new String(keyBytes),
@@ -3612,6 +3616,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
           ByteUtils.extractByteArray(valueBytes),
           AvroProtocolDefinition.GLOBAL_RT_DIV_STATE.getCurrentProtocolVersion());
     } catch (Exception e) {
+      // TODO: evaluate whether these logs can be set to debug
       LOGGER.error(
           "Unable to deserialize stored value bytes for key: {}, topic-partition: {}",
           new String(keyBytes),

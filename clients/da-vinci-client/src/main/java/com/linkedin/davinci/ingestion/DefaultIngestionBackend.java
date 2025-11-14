@@ -11,11 +11,13 @@ import com.linkedin.davinci.storage.StorageService;
 import com.linkedin.davinci.store.StorageEngine;
 import com.linkedin.davinci.store.StoragePartitionAdjustmentTrigger;
 import com.linkedin.davinci.store.StoragePartitionConfig;
+import com.linkedin.venice.exceptions.VenicePeersNotFoundException;
 import com.linkedin.venice.kafka.protocol.state.StoreVersionState;
 import com.linkedin.venice.meta.Store;
 import com.linkedin.venice.meta.StoreVersionInfo;
 import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.offsets.OffsetRecord;
+import com.linkedin.venice.pubsub.api.PubSubPosition;
 import com.linkedin.venice.pubsub.api.PubSubSymbolicPosition;
 import com.linkedin.venice.store.rocksdb.RocksDBUtils;
 import com.linkedin.venice.utils.ConfigCommonUtils;
@@ -24,6 +26,7 @@ import com.linkedin.venice.utils.concurrent.VeniceConcurrentHashMap;
 import java.io.File;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicReference;
@@ -59,7 +62,10 @@ public class DefaultIngestionBackend implements IngestionBackend {
   }
 
   @Override
-  public void startConsumption(VeniceStoreVersionConfig storeConfig, int partition) {
+  public void startConsumption(
+      VeniceStoreVersionConfig storeConfig,
+      int partition,
+      Optional<PubSubPosition> pubSubPosition) {
     String storeVersion = storeConfig.getStoreVersionName();
     LOGGER.info("Retrieving storage engine for store {} partition {}", storeVersion, partition);
     StoreVersionInfo storeAndVersion =
@@ -79,7 +85,7 @@ public class DefaultIngestionBackend implements IngestionBackend {
           "Retrieved storage engine for store {} partition {}. Starting consumption in ingestion service",
           storeVersion,
           partition);
-      getStoreIngestionService().startConsumption(storeConfig, partition);
+      getStoreIngestionService().startConsumption(storeConfig, partition, pubSubPosition);
       LOGGER.info(
           "Completed starting consumption in ingestion service for store {} partition {}",
           storeVersion,
@@ -167,7 +173,7 @@ public class DefaultIngestionBackend implements IngestionBackend {
 
     return blobTransferManager.get(storeName, versionNumber, partitionId, tableFormat)
         .handle((inputStream, throwable) -> {
-          updateBlobTransferResponseStats(throwable == null, storeName, versionNumber);
+          updateBlobTransferResponseStats(throwable, storeName, versionNumber);
           if (throwable != null) {
             LOGGER.error(
                 "Failed to bootstrap partition {} from blobs transfer for store {} with exception {}, falling back to kafka ingestion.",
@@ -448,9 +454,9 @@ public class DefaultIngestionBackend implements IngestionBackend {
 
   /**
    * Update the blob transfer response stats based on the blob transfer success.
-   * @param isBlobTransferSuccess true if the blob transfer is successful, false otherwise.
+   * Skip counting if the exception is VenicePeersNotFoundException due to no actual transfer happened.
    */
-  private void updateBlobTransferResponseStats(boolean isBlobTransferSuccess, String storeName, int version) {
+  private void updateBlobTransferResponseStats(Object throwable, String storeName, int version) {
     if (blobTransferManager.getAggVersionedBlobTransferStats() == null) {
       LOGGER.error(
           "Blob transfer stats is not initialized. Skip updating blob transfer response stats for store {} version {}",
@@ -459,12 +465,16 @@ public class DefaultIngestionBackend implements IngestionBackend {
       return;
     }
 
+    if (throwable != null && throwable instanceof VenicePeersNotFoundException) {
+      return;
+    }
+
     try {
       // Record the blob transfer request count.
       blobTransferManager.getAggVersionedBlobTransferStats().recordBlobTransferResponsesCount(storeName, version);
       // Record the blob transfer response based on the blob transfer status.
       blobTransferManager.getAggVersionedBlobTransferStats()
-          .recordBlobTransferResponsesBasedOnBoostrapStatus(storeName, version, isBlobTransferSuccess);
+          .recordBlobTransferResponsesBasedOnBoostrapStatus(storeName, version, throwable == null);
     } catch (Exception e) {
       LOGGER.error("Failed to update blob transfer response stats for store {} version {}", storeName, version, e);
     }

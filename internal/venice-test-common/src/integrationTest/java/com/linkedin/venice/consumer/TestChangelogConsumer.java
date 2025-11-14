@@ -43,9 +43,9 @@ import static org.testng.Assert.assertTrue;
 
 import com.linkedin.d2.balancer.D2Client;
 import com.linkedin.d2.balancer.D2ClientBuilder;
-import com.linkedin.davinci.consumer.BootstrappingVeniceChangelogConsumer;
 import com.linkedin.davinci.consumer.ChangeEvent;
 import com.linkedin.davinci.consumer.ChangelogClientConfig;
+import com.linkedin.davinci.consumer.ImmutableChangeCapturePubSubMessage;
 import com.linkedin.davinci.consumer.VeniceAfterImageConsumerImpl;
 import com.linkedin.davinci.consumer.VeniceChangeCoordinate;
 import com.linkedin.davinci.consumer.VeniceChangelogConsumer;
@@ -790,118 +790,6 @@ public class TestChangelogConsumer {
   }
 
   @Test(timeOut = TEST_TIMEOUT, priority = 3)
-  public void testSpecificRecordBootstrappingVeniceChangelogConsumer() throws Exception {
-    ControllerClient childControllerClient =
-        new ControllerClient(clusterName, childDatacenters.get(0).getControllerConnectString());
-    File inputDir = getTempDataDirectory();
-    Schema recordSchema = TestWriteUtils.writeSimpleAvroFileWithStringToNameRecordV1Schema(inputDir);
-    String inputDirPath = "file://" + inputDir.getAbsolutePath();
-    String storeName = Utils.getUniqueString("store");
-    Properties props = TestWriteUtils.defaultVPJProps(
-        parentControllers.get(0).getControllerUrl(),
-        inputDirPath,
-        storeName,
-        clusterWrapper.getPubSubClientProperties());
-    String keySchemaStr = recordSchema.getField(DEFAULT_KEY_FIELD_PROP).schema().toString();
-    String valueSchemaStr = NAME_RECORD_V2_SCHEMA.toString();
-    UpdateStoreQueryParams storeParms = new UpdateStoreQueryParams().setActiveActiveReplicationEnabled(true)
-        .setHybridRewindSeconds(500)
-        .setHybridOffsetLagThreshold(8)
-        .setChunkingEnabled(true)
-        .setNativeReplicationEnabled(true)
-        .setPartitionCount(3);
-    MetricsRepository metricsRepository =
-        getVeniceMetricsRepository(CHANGE_DATA_CAPTURE_CLIENT, CONSUMER_METRIC_ENTITIES, true);
-    ControllerClient setupControllerClient =
-        createStoreForJob(clusterName, keySchemaStr, valueSchemaStr, props, storeParms);
-    setupControllerClient
-        .retryableRequest(5, controllerClient1 -> setupControllerClient.updateStore(storeName, storeParms));
-    // Registering real data schema as schema v2.
-    setupControllerClient.retryableRequest(
-        5,
-        controllerClient1 -> setupControllerClient.addValueSchema(storeName, NAME_RECORD_V1_SCHEMA.toString()));
-
-    IntegrationTestPushUtils.runVPJ(props);
-    ZkServerWrapper localZkServer = multiRegionMultiClusterWrapper.getChildRegions().get(0).getZkServerWrapper();
-    PubSubBrokerWrapper localKafka = multiRegionMultiClusterWrapper.getChildRegions().get(0).getPubSubBrokerWrapper();
-    Properties consumerProperties = new Properties();
-    consumerProperties.putAll(multiRegionMultiClusterWrapper.getPubSubClientProperties());
-    String localKafkaUrl = localKafka.getAddress();
-    consumerProperties.put(KAFKA_BOOTSTRAP_SERVERS, localKafkaUrl);
-    consumerProperties.put(CLUSTER_NAME, clusterName);
-    consumerProperties.put(ZOOKEEPER_ADDRESS, localZkServer.getAddress());
-    ChangelogClientConfig globalChangelogClientConfig =
-        new ChangelogClientConfig().setConsumerProperties(consumerProperties)
-            .setControllerD2ServiceName(D2_SERVICE_NAME)
-            .setD2ServiceName(VeniceRouterWrapper.CLUSTER_DISCOVERY_D2_SERVICE_NAME)
-            .setLocalD2ZkHosts(localZkServer.getAddress())
-            .setD2Client(IntegrationTestPushUtils.getD2Client(localZkServer.getAddress()))
-            .setControllerRequestRetryCount(3)
-            .setVersionSwapDetectionIntervalTimeInSeconds(3L)
-            .setSpecificValue(TestChangelogValue.class)
-            .setBootstrapFileSystemPath(Utils.getUniqueString(inputDirPath));
-    VeniceChangelogConsumerClientFactory veniceChangelogConsumerClientFactory =
-        new VeniceChangelogConsumerClientFactory(globalChangelogClientConfig, metricsRepository);
-    BootstrappingVeniceChangelogConsumer<Utf8, TestChangelogValue> specificChangelogConsumer =
-        veniceChangelogConsumerClientFactory
-            .getBootstrappingChangelogConsumer(storeName, "0", TestChangelogValue.class);
-    specificChangelogConsumer.start().get();
-
-    Map<String, PubSubMessage<Utf8, ChangeEvent<TestChangelogValue>, VeniceChangeCoordinate>> polledChangeEventsMap =
-        new HashMap<>();
-    List<PubSubMessage<Utf8, ChangeEvent<TestChangelogValue>, VeniceChangeCoordinate>> polledChangeEventsList =
-        new ArrayList<>();
-    TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, true, () -> {
-      IntegrationTestUtils.pollChangeEventsFromSpecificBootstrappingChangeCaptureConsumer(
-          polledChangeEventsMap,
-          polledChangeEventsList,
-          specificChangelogConsumer);
-      Assert.assertEquals(polledChangeEventsList.size(), 101);
-    });
-    Assert.assertTrue(
-        polledChangeEventsMap.get(Integer.toString(1)).getValue().getCurrentValue() instanceof SpecificRecord);
-    TestChangelogValue value = new TestChangelogValue();
-    value.firstName = "first_name_1";
-    value.lastName = "last_name_1";
-    Assert.assertEquals(polledChangeEventsMap.get(Integer.toString(1)).getValue().getCurrentValue(), value);
-    polledChangeEventsList.clear();
-    polledChangeEventsMap.clear();
-
-    GenericRecord genericRecord = new GenericData.Record(NAME_RECORD_V1_SCHEMA);
-    genericRecord.put("firstName", "Venice");
-    genericRecord.put("lastName", "Italy");
-
-    GenericRecord genericRecordV2 = new GenericData.Record(NAME_RECORD_V1_SCHEMA);
-    genericRecordV2.put("firstName", "Barcelona");
-    genericRecordV2.put("lastName", "Spain");
-
-    try (VeniceSystemProducer veniceProducer =
-        IntegrationTestPushUtils.getSamzaProducerForStream(multiRegionMultiClusterWrapper, 0, storeName)) {
-      // Run Samza job to send PUT and DELETE requests.
-      sendStreamingRecord(veniceProducer, storeName, Integer.toString(10000), genericRecord, null);
-      sendStreamingRecord(veniceProducer, storeName, Integer.toString(10000), genericRecordV2, null);
-    }
-
-    TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, true, () -> {
-      IntegrationTestUtils.pollChangeEventsFromSpecificBootstrappingChangeCaptureConsumer(
-          polledChangeEventsMap,
-          polledChangeEventsList,
-          specificChangelogConsumer);
-      Assert.assertEquals(polledChangeEventsList.size(), 2);
-    });
-    Assert.assertTrue(
-        polledChangeEventsMap.get(Integer.toString(10000)).getValue().getCurrentValue() instanceof SpecificRecord);
-
-    parentControllerClient.disableAndDeleteStore(storeName);
-    // Verify that topics and store is cleaned up
-    TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, true, () -> {
-      MultiStoreTopicsResponse storeTopicsResponse = childControllerClient.getDeletableStoreTopics();
-      Assert.assertFalse(storeTopicsResponse.isError());
-      Assert.assertEquals(storeTopicsResponse.getTopics().size(), 0);
-    });
-  }
-
-  @Test(timeOut = TEST_TIMEOUT, priority = 3)
   public void testSpecificRecordVeniceChangelogConsumer() throws Exception {
     ControllerClient childControllerClient =
         new ControllerClient(clusterName, childDatacenters.get(0).getControllerConnectString());
@@ -1100,6 +988,86 @@ public class TestChangelogConsumer {
   }
 
   @Test(timeOut = TEST_TIMEOUT, priority = 3)
+  public void testNewChangelogConsumerWithNewValueSchema()
+      throws IOException, ExecutionException, InterruptedException {
+    File inputDir = getTempDataDirectory();
+    Schema recordSchema = TestWriteUtils.writeSimpleAvroFileWithStringToNameRecordV1Schema(inputDir);
+    String inputDirPath = "file://" + inputDir.getAbsolutePath();
+    String storeName = Utils.getUniqueString("store");
+    Properties props = TestWriteUtils.defaultVPJProps(
+        parentControllers.get(0).getControllerUrl(),
+        inputDirPath,
+        storeName,
+        clusterWrapper.getPubSubClientProperties());
+    String keySchemaStr = recordSchema.getField(DEFAULT_KEY_FIELD_PROP).schema().toString();
+    String valueSchemaStr = NAME_RECORD_V1_SCHEMA.toString();
+    UpdateStoreQueryParams storeParms = new UpdateStoreQueryParams().setActiveActiveReplicationEnabled(true)
+        .setHybridRewindSeconds(500)
+        .setHybridOffsetLagThreshold(8)
+        .setChunkingEnabled(true)
+        .setNativeReplicationEnabled(true)
+        .setPartitionCount(3);
+    MetricsRepository metricsRepository =
+        getVeniceMetricsRepository(CHANGE_DATA_CAPTURE_CLIENT, CONSUMER_METRIC_ENTITIES, true);
+    ControllerClient setupControllerClient =
+        createStoreForJob(clusterName, keySchemaStr, valueSchemaStr, props, storeParms);
+    IntegrationTestPushUtils.runVPJ(props);
+    ZkServerWrapper localZkServer = multiRegionMultiClusterWrapper.getChildRegions().get(0).getZkServerWrapper();
+    PubSubBrokerWrapper localKafka = multiRegionMultiClusterWrapper.getChildRegions().get(0).getPubSubBrokerWrapper();
+    Properties consumerProperties = new Properties();
+    consumerProperties.putAll(multiRegionMultiClusterWrapper.getPubSubClientProperties());
+    String localKafkaUrl = localKafka.getAddress();
+    consumerProperties.put(KAFKA_BOOTSTRAP_SERVERS, localKafkaUrl);
+    consumerProperties.put(CLUSTER_NAME, clusterName);
+    consumerProperties.put(ZOOKEEPER_ADDRESS, localZkServer.getAddress());
+    // setVersionSwapDetectionIntervalTimeInSeconds also controls native metadata repository refresh interval, setting
+    // it to a large value to reproduce the scenario where the newly added schema is yet to be fetched.
+    ChangelogClientConfig globalChangelogClientConfig =
+        new ChangelogClientConfig().setConsumerProperties(consumerProperties)
+            .setControllerD2ServiceName(D2_SERVICE_NAME)
+            .setD2ServiceName(VeniceRouterWrapper.CLUSTER_DISCOVERY_D2_SERVICE_NAME)
+            .setLocalD2ZkHosts(localZkServer.getAddress())
+            .setControllerRequestRetryCount(3)
+            .setVersionSwapDetectionIntervalTimeInSeconds(180)
+            .setUseRequestBasedMetadataRepository(true)
+            .setD2Client(d2Client)
+            .setBootstrapFileSystemPath(Utils.getUniqueString(inputDirPath))
+            .setIsNewStatelessClientEnabled(true);
+    VeniceChangelogConsumerClientFactory veniceChangelogConsumerClientFactory =
+        new VeniceChangelogConsumerClientFactory(globalChangelogClientConfig, metricsRepository);
+    VeniceChangelogConsumer<Utf8, Utf8> changeLogConsumer =
+        veniceChangelogConsumerClientFactory.getChangelogConsumer(storeName, "0");
+
+    changeLogConsumer.subscribeAll().get();
+    Map<String, PubSubMessage<Utf8, ChangeEvent<Utf8>, VeniceChangeCoordinate>> polledChangeEventsMap = new HashMap<>();
+    TestUtils.waitForNonDeterministicAssertion(120, TimeUnit.SECONDS, true, () -> {
+      IntegrationTestUtils.pollChangeEventsFromChangeCaptureConsumer(polledChangeEventsMap, changeLogConsumer);
+      Assert.assertEquals(polledChangeEventsMap.size(), 100);
+      Assert.assertTrue(changeLogConsumer.isCaughtUp());
+    });
+    TestUtils.assertCommand(
+        setupControllerClient.retryableRequest(
+            5,
+            controllerClient -> setupControllerClient.addValueSchema(storeName, NAME_RECORD_V2_SCHEMA.toString())),
+        "Failed to add schema: " + NAME_RECORD_V2_SCHEMA.toString() + " to store " + storeName);
+    GenericRecord genericRecord = new GenericData.Record(NAME_RECORD_V2_SCHEMA);
+    genericRecord.put("firstName", "Venice");
+    genericRecord.put("lastName", "Italy");
+    genericRecord.put("age", 18);
+    try (VeniceSystemProducer veniceProducer =
+        IntegrationTestPushUtils.getSamzaProducerForStream(multiRegionMultiClusterWrapper, 0, storeName)) {
+      // Run Samza job to send the new write with schema v2.
+      sendStreamingRecord(veniceProducer, storeName, Integer.toString(10000), genericRecord, null);
+    }
+    TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, true, () -> {
+      IntegrationTestUtils.pollChangeEventsFromChangeCaptureConsumer(polledChangeEventsMap, changeLogConsumer);
+      Assert.assertEquals(polledChangeEventsMap.size(), 101);
+    });
+    Assert.assertNotNull(polledChangeEventsMap.get(Integer.toString(10000)));
+    parentControllerClient.disableAndDeleteStore(storeName);
+  }
+
+  @Test(timeOut = TEST_TIMEOUT, priority = 3)
   public void testChangeLogConsumerSequenceId() throws IOException, ExecutionException, InterruptedException {
     File inputDir = getTempDataDirectory();
     Schema recordSchema = TestWriteUtils.writeSimpleAvroFileWithStringToNameRecordV1Schema(inputDir);
@@ -1165,6 +1133,110 @@ public class TestChangelogConsumer {
   }
 
   @Test(timeOut = TEST_TIMEOUT, priority = 3)
+  public void testVersionSpecificSeekingChangeLogConsumer()
+      throws IOException, ExecutionException, InterruptedException {
+    File inputDir = getTempDataDirectory();
+    int version = 1;
+    int numKeys = 100;
+    Schema recordSchema =
+        TestWriteUtils.writeSimpleAvroFileWithIntToStringSchema(inputDir, Integer.toString(version), numKeys);
+    String inputDirPath = "file://" + inputDir.getAbsolutePath();
+    String storeName = Utils.getUniqueString("store");
+    Properties props = TestWriteUtils.defaultVPJProps(
+        parentControllers.get(0).getControllerUrl(),
+        inputDirPath,
+        storeName,
+        clusterWrapper.getPubSubClientProperties());
+    String keySchemaStr = recordSchema.getField(DEFAULT_KEY_FIELD_PROP).schema().toString();
+    String valueSchemaStr = STRING_SCHEMA.toString();
+    UpdateStoreQueryParams storeParms = new UpdateStoreQueryParams().setActiveActiveReplicationEnabled(true)
+        .setHybridRewindSeconds(500)
+        .setHybridOffsetLagThreshold(8)
+        .setChunkingEnabled(true)
+        .setNativeReplicationEnabled(true)
+        .setPartitionCount(3);
+    MetricsRepository metricsRepository =
+        getVeniceMetricsRepository(CHANGE_DATA_CAPTURE_CLIENT, CONSUMER_METRIC_ENTITIES, true);
+    createStoreForJob(clusterName, keySchemaStr, valueSchemaStr, props, storeParms);
+    IntegrationTestPushUtils.runVPJ(props);
+    ZkServerWrapper localZkServer = multiRegionMultiClusterWrapper.getChildRegions().get(0).getZkServerWrapper();
+    PubSubBrokerWrapper localKafka = multiRegionMultiClusterWrapper.getChildRegions().get(0).getPubSubBrokerWrapper();
+    Properties consumerProperties = new Properties();
+    consumerProperties.putAll(multiRegionMultiClusterWrapper.getPubSubClientProperties());
+    String localKafkaUrl = localKafka.getAddress();
+    consumerProperties.put(KAFKA_BOOTSTRAP_SERVERS, localKafkaUrl);
+    consumerProperties.put(CLUSTER_NAME, clusterName);
+    consumerProperties.put(ZOOKEEPER_ADDRESS, localZkServer.getAddress());
+    ChangelogClientConfig globalChangelogClientConfig =
+        new ChangelogClientConfig().setConsumerProperties(consumerProperties)
+            .setControllerD2ServiceName(D2_SERVICE_NAME)
+            .setD2ServiceName(VeniceRouterWrapper.CLUSTER_DISCOVERY_D2_SERVICE_NAME)
+            .setLocalD2ZkHosts(localZkServer.getAddress())
+            .setControllerRequestRetryCount(3)
+            .setVersionSwapDetectionIntervalTimeInSeconds(3)
+            .setUseRequestBasedMetadataRepository(true)
+            .setD2Client(d2Client)
+            .setBootstrapFileSystemPath(Utils.getUniqueString(inputDirPath));
+    VeniceChangelogConsumerClientFactory veniceChangelogConsumerClientFactory =
+        new VeniceChangelogConsumerClientFactory(globalChangelogClientConfig, metricsRepository);
+    VeniceChangelogConsumer<Integer, Utf8> changeLogConsumer =
+        veniceChangelogConsumerClientFactory.getVersionSpecificChangelogConsumer(storeName, 1);
+
+    changeLogConsumer.subscribeAll().get();
+    Map<Integer, PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate>> pubSubMessagesMap = new HashMap();
+    TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, () -> {
+      Collection<PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate>> pubSubMessagesList =
+          changeLogConsumer.poll(1000);
+      for (PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate> message: pubSubMessagesList) {
+        pubSubMessagesMap.put(message.getKey(), message);
+      }
+      assertEquals(pubSubMessagesMap.size(), numKeys);
+    });
+
+    Map<Integer, VeniceChangeCoordinate> partitionToChangeCoordinateMap = new HashMap();
+
+    // All data should be from version 1
+    for (int i = 1; i <= numKeys; i++) {
+      ImmutableChangeCapturePubSubMessage<Integer, ChangeEvent<Utf8>> message =
+          (ImmutableChangeCapturePubSubMessage<Integer, ChangeEvent<Utf8>>) pubSubMessagesMap.get(i);
+      partitionToChangeCoordinateMap.put(message.getPartition(), message.getPosition());
+
+      assertEquals(message.getValue().getCurrentValue().toString(), Integer.toString(version) + i);
+      assertTrue(message.getPayloadSize() > 0);
+      assertNotNull(message.getPosition());
+      assertTrue(message.getWriterSchemaId() > 0);
+      assertNotNull(message.getReplicationMetadataPayload());
+    }
+
+    // Restart client and resume from the last consumed checkpoints
+    changeLogConsumer.close();
+    pubSubMessagesMap.clear();
+    changeLogConsumer.seekToCheckpoint(new HashSet<>(partitionToChangeCoordinateMap.values())).get();
+
+    // Shouldn't be any messages to consume
+    Collection<PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate>> pubSubMessagesList =
+        changeLogConsumer.poll(1000);
+    assertEquals(pubSubMessagesList.size(), 0);
+
+    try (VeniceSystemProducer veniceProducer =
+        IntegrationTestPushUtils.getSamzaProducerForStream(multiRegionMultiClusterWrapper, 0, storeName)) {
+      // Run Samza job to send PUT and DELETE requests.
+      sendStreamingRecord(veniceProducer, storeName, 10000, "10000", null);
+    }
+
+    TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, () -> {
+      Collection<PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate>> tempPubSubMessagesList =
+          changeLogConsumer.poll(1000);
+      assertEquals(tempPubSubMessagesList.size(), 1);
+
+      for (PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate> pubSubMessage: tempPubSubMessagesList) {
+        assertEquals((int) pubSubMessage.getKey(), 10000);
+        assertEquals(pubSubMessage.getValue().getCurrentValue().toString(), "10000");
+      }
+    });
+  }
+
+  @Test(timeOut = TEST_TIMEOUT, priority = 3)
   public void testVersionSpecificChangeLogConsumer() throws IOException, ExecutionException, InterruptedException {
     File inputDir = getTempDataDirectory();
     int version = 1;
@@ -1211,7 +1283,7 @@ public class TestChangelogConsumer {
     VeniceChangelogConsumerClientFactory veniceChangelogConsumerClientFactory =
         new VeniceChangelogConsumerClientFactory(globalChangelogClientConfig, metricsRepository);
     VeniceChangelogConsumer<Integer, Utf8> changeLogConsumer =
-        veniceChangelogConsumerClientFactory.getVersionSpecificChangelogConsumer(storeName, 1, "0");
+        veniceChangelogConsumerClientFactory.getVersionSpecificChangelogConsumer(storeName, 1);
 
     changeLogConsumer.subscribeAll().get();
     Map<Integer, PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate>> pubSubMessagesMap = new HashMap();
@@ -1226,7 +1298,8 @@ public class TestChangelogConsumer {
 
     // All data should be from version 1
     for (int i = 1; i <= numKeys; i++) {
-      PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate> message = pubSubMessagesMap.get(i);
+      ImmutableChangeCapturePubSubMessage<Integer, ChangeEvent<Utf8>> message =
+          (ImmutableChangeCapturePubSubMessage<Integer, ChangeEvent<Utf8>>) pubSubMessagesMap.get(i);
       assertEquals(message.getValue().getCurrentValue().toString(), Integer.toString(version) + i);
       assertTrue(message.getPayloadSize() > 0);
       assertNotNull(message.getPosition());
@@ -1250,7 +1323,8 @@ public class TestChangelogConsumer {
 
     // All data should be from version 1
     for (int i = 1; i <= numKeys; i++) {
-      PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate> message = pubSubMessagesMap.get(i);
+      ImmutableChangeCapturePubSubMessage<Integer, ChangeEvent<Utf8>> message =
+          (ImmutableChangeCapturePubSubMessage<Integer, ChangeEvent<Utf8>>) pubSubMessagesMap.get(i);
       assertEquals(message.getValue().getCurrentValue().toString(), Integer.toString(version) + i);
       assertTrue(message.getPayloadSize() > 0);
       assertNotNull(message.getPosition());
@@ -1282,7 +1356,8 @@ public class TestChangelogConsumer {
 
     // All data should be from version 1
     for (int i = 1; i <= numKeys; i++) {
-      PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate> message = pubSubMessagesMap.get(i);
+      ImmutableChangeCapturePubSubMessage<Integer, ChangeEvent<Utf8>> message =
+          (ImmutableChangeCapturePubSubMessage<Integer, ChangeEvent<Utf8>>) pubSubMessagesMap.get(i);
       assertEquals(message.getValue().getCurrentValue().toString(), Integer.toString(version - 1) + i);
       assertTrue(message.getPayloadSize() > 0);
       assertNotNull(message.getPosition());
@@ -1299,7 +1374,7 @@ public class TestChangelogConsumer {
     IntegrationTestPushUtils.runVPJ(props);
 
     VeniceChangelogConsumer<Integer, Utf8> changeLogConsumer3 =
-        veniceChangelogConsumerClientFactory.getVersionSpecificChangelogConsumer(storeName, version, "0");
+        veniceChangelogConsumerClientFactory.getVersionSpecificChangelogConsumer(storeName, version);
     changeLogConsumer3.subscribeAll().get();
 
     TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, () -> {
@@ -1313,7 +1388,8 @@ public class TestChangelogConsumer {
 
     // All data should be from future version 3
     for (int i = 1; i <= numKeys; i++) {
-      PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate> message = pubSubMessagesMap.get(i);
+      ImmutableChangeCapturePubSubMessage<Integer, ChangeEvent<Utf8>> message =
+          (ImmutableChangeCapturePubSubMessage<Integer, ChangeEvent<Utf8>>) pubSubMessagesMap.get(i);
       assertEquals(message.getValue().getCurrentValue().toString(), Integer.toString(version) + i);
       assertTrue(message.getPayloadSize() > 0);
       assertNotNull(message.getPosition());

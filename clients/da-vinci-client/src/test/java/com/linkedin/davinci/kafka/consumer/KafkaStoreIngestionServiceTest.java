@@ -172,6 +172,13 @@ public abstract class KafkaStoreIngestionServiceTest {
     doReturn(-1L).when(mockVeniceServerConfig).getKafkaFetchQuotaRecordPerSecond();
     doReturn(-1L).when(mockVeniceServerConfig).getKafkaFetchQuotaUnorderedBytesPerSecond();
     doReturn(-1L).when(mockVeniceServerConfig).getKafkaFetchQuotaUnorderedRecordPerSecond();
+    doReturn(-1).when(mockVeniceServerConfig).getSepRTLeaderQuotaRecordsPerSecond();
+    doReturn(-1).when(mockVeniceServerConfig).getCurrentVersionAAWCLeaderQuotaRecordsPerSecond();
+    doReturn(-1).when(mockVeniceServerConfig).getNonCurrentVersionAAWCLeaderQuotaRecordsPerSecond();
+    doReturn(-1).when(mockVeniceServerConfig).getCurrentVersionSepRTLeaderQuotaRecordsPerSecond();
+    doReturn(-1).when(mockVeniceServerConfig).getCurrentVersionNonAAWCLeaderQuotaRecordsPerSecond();
+    doReturn(-1).when(mockVeniceServerConfig).getNonCurrentVersionNonAAWCLeaderQuotaRecordsPerSecond();
+
     doReturn("").when(mockVeniceServerConfig).getDataBasePath();
     doReturn(0.9d).when(mockVeniceServerConfig).getDiskFullThreshold();
     doReturn(Int2ObjectMaps.emptyMap()).when(mockVeniceServerConfig).getKafkaClusterIdToAliasMap();
@@ -307,7 +314,8 @@ public abstract class KafkaStoreIngestionServiceTest {
     doReturn(new StoreVersionInfo(toBeDeletedStore, toBeDeletedStore.getVersion(1))).when(mockMetadataRepo)
         .waitVersion(eq(deletedStoreName), eq(1), any());
     VeniceProperties veniceProperties = AbstractStorageEngineTest.getServerProperties(PersistenceType.ROCKS_DB);
-    kafkaStoreIngestionService.startConsumption(new VeniceStoreVersionConfig(topic1, veniceProperties), 0);
+    kafkaStoreIngestionService
+        .startConsumption(new VeniceStoreVersionConfig(topic1, veniceProperties), 0, Optional.empty());
     assertEquals(
         kafkaStoreIngestionService.getIngestingTopicsWithVersionStatusNotOnline().size(),
         1,
@@ -320,8 +328,10 @@ public abstract class KafkaStoreIngestionServiceTest {
     mockStore.addVersion(new VersionImpl(storeName, 2, "test-job-id"));
     doReturn(new StoreVersionInfo(mockStore, mockStore.getVersion(2))).when(mockMetadataRepo)
         .waitVersion(eq(storeName), eq(2), any());
-    kafkaStoreIngestionService.startConsumption(new VeniceStoreVersionConfig(topic2, veniceProperties), 0);
-    kafkaStoreIngestionService.startConsumption(new VeniceStoreVersionConfig(invalidTopic, veniceProperties), 0);
+    kafkaStoreIngestionService
+        .startConsumption(new VeniceStoreVersionConfig(topic2, veniceProperties), 0, Optional.empty());
+    kafkaStoreIngestionService
+        .startConsumption(new VeniceStoreVersionConfig(invalidTopic, veniceProperties), 0, Optional.empty());
     doThrow(new VeniceNoStoreException(deletedStoreName)).when(mockMetadataRepo).getStoreOrThrow(deletedStoreName);
     doReturn(null).when(mockMetadataRepo).getStore(deletedStoreName);
     assertEquals(
@@ -365,7 +375,8 @@ public abstract class KafkaStoreIngestionServiceTest {
     doReturn(new StoreVersionInfo(mockStore, mockStore.getVersion(1))).when(mockMetadataRepo)
         .waitVersion(eq(storeName), eq(1), any());
     VeniceProperties veniceProperties = AbstractStorageEngineTest.getServerProperties(PersistenceType.ROCKS_DB);
-    kafkaStoreIngestionService.startConsumption(new VeniceStoreVersionConfig(topicName, veniceProperties), 0);
+    kafkaStoreIngestionService
+        .startConsumption(new VeniceStoreVersionConfig(topicName, veniceProperties), 0, Optional.empty());
     StoreIngestionTask storeIngestionTask = kafkaStoreIngestionService.getStoreIngestionTask(topicName);
     kafkaStoreIngestionService.shutdownStoreIngestionTask(topicName);
     StoreIngestionTask closedStoreIngestionTask = kafkaStoreIngestionService.getStoreIngestionTask(topicName);
@@ -374,14 +385,16 @@ public abstract class KafkaStoreIngestionServiceTest {
     StorageEngine storageEngine2 = mock(DelegatingStorageEngine.class);
     doReturn(new ReferenceCounted<>(storageEngine2, se -> {})).when(mockStorageService)
         .getRefCountedStorageEngine(topicName);
-    kafkaStoreIngestionService.startConsumption(new VeniceStoreVersionConfig(topicName, veniceProperties), 0);
+    kafkaStoreIngestionService
+        .startConsumption(new VeniceStoreVersionConfig(topicName, veniceProperties), 0, Optional.empty());
     StoreIngestionTask newStoreIngestionTask = kafkaStoreIngestionService.getStoreIngestionTask(topicName);
     Assert.assertNotNull(newStoreIngestionTask);
     Assert.assertNotEquals(storeIngestionTask, newStoreIngestionTask);
     assertEquals(newStoreIngestionTask.getStorageEngine(), storageEngine2);
 
     // Mimic a graceful shutdown timeout
-    kafkaStoreIngestionService.startConsumption(new VeniceStoreVersionConfig(topicName, veniceProperties), 0);
+    kafkaStoreIngestionService
+        .startConsumption(new VeniceStoreVersionConfig(topicName, veniceProperties), 0, Optional.empty());
     StoreIngestionTask shutdownTimeoutTask = kafkaStoreIngestionService.getStoreIngestionTask(topicName);
     // Initialize the latch forcefully to mimic task is running
     shutdownTimeoutTask.getGracefulShutdownLatch().get();
@@ -437,7 +450,7 @@ public abstract class KafkaStoreIngestionServiceTest {
         .waitVersion(eq(storeName), eq(1), any());
     VeniceProperties veniceProperties = AbstractStorageEngineTest.getServerProperties(PersistenceType.ROCKS_DB);
     VeniceStoreVersionConfig config = new VeniceStoreVersionConfig(topicName, veniceProperties);
-    kafkaStoreIngestionService.startConsumption(config, 0);
+    kafkaStoreIngestionService.startConsumption(config, 0, Optional.empty());
     kafkaStoreIngestionService.stopConsumptionAndWait(config, 0, 1, 1, true);
     StoreIngestionTask storeIngestionTask = kafkaStoreIngestionService.getStoreIngestionTask(topicName);
     if (isIsolatedIngestion) {
@@ -445,7 +458,7 @@ public abstract class KafkaStoreIngestionServiceTest {
     } else {
       assertNull(storeIngestionTask);
     }
-    kafkaStoreIngestionService.startConsumption(config, 0);
+    kafkaStoreIngestionService.startConsumption(config, 0, Optional.empty());
     storeIngestionTask = kafkaStoreIngestionService.getStoreIngestionTask(topicName);
     storeIngestionTask.setPartitionConsumptionState(1, mock(PartitionConsumptionState.class));
     kafkaStoreIngestionService.stopConsumptionAndWait(config, 0, 1, 1, true);
@@ -457,7 +470,7 @@ public abstract class KafkaStoreIngestionServiceTest {
     AbstractKafkaConsumerService kafkaConsumerService =
         spy(storeIngestionTask.aggKafkaConsumerService.createKafkaConsumerService(consumerProperties));
     kafkaStoreIngestionService.getTopicPartitionIngestionContext(topicName, topicName, 0);
-    verify(kafkaConsumerService, atMostOnce()).getIngestionInfoFor(pubSubTopic, pubSubTopicPartition);
+    verify(kafkaConsumerService, atMostOnce()).getIngestionInfoFor(pubSubTopic, pubSubTopicPartition, false);
     kafkaStoreIngestionService.close();
   }
 
@@ -589,7 +602,7 @@ public abstract class KafkaStoreIngestionServiceTest {
         .waitVersion(eq(storeName), eq(1), any());
     VeniceProperties veniceProperties = AbstractStorageEngineTest.getServerProperties(PersistenceType.ROCKS_DB);
     VeniceStoreVersionConfig config = new VeniceStoreVersionConfig(topicName, veniceProperties);
-    kafkaStoreIngestionService.startConsumption(config, 0);
+    kafkaStoreIngestionService.startConsumption(config, 0, Optional.empty());
     // kafkaStoreIngestionService.stopConsumptionAndWait(config, 0, 1, 1, true);
     final StoreIngestionTask storeIngestionTask = kafkaStoreIngestionService.getStoreIngestionTask(topicName);
     // Unsubscribe from partition 0 to make the store ingestion task idle
@@ -627,7 +640,7 @@ public abstract class KafkaStoreIngestionServiceTest {
         .waitVersion(eq(storeName), eq(1), any());
     VeniceProperties veniceProperties = AbstractStorageEngineTest.getServerProperties(PersistenceType.ROCKS_DB);
     VeniceStoreVersionConfig config = new VeniceStoreVersionConfig(topicName, veniceProperties);
-    kafkaStoreIngestionService.startConsumption(config, 0);
+    kafkaStoreIngestionService.startConsumption(config, 0, Optional.empty());
     // kafkaStoreIngestionService.stopConsumptionAndWait(config, 0, 1, 1, true);
     final StoreIngestionTask storeIngestionTask = kafkaStoreIngestionService.getStoreIngestionTask(topicName);
     // Unsubscribe from partition 0 to make the store ingestion task idle

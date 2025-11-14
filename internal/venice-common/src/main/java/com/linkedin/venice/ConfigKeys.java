@@ -219,10 +219,6 @@ public class ConfigKeys {
   public static final String DA_VINCI_CURRENT_VERSION_BOOTSTRAPPING_QUOTA_BYTES_PER_SECOND =
       "da.vinci.current.version.bootstrapping.quota.bytes.per.second";
 
-  // On Da Vinci Client, control over automatic partition subscription.
-  public static final String DA_VINCI_SUBSCRIBE_ON_DISK_PARTITIONS_AUTOMATICALLY =
-      "da.vinci.subscribe.on.disk.partitions.automatically";
-
   // Unordered throttlers aren't compatible with Shared Kafka Consumer and have no effect when Shared Consumer is used.
   public static final String KAFKA_FETCH_QUOTA_UNORDERED_BYTES_PER_SECOND =
       "kafka.fetch.quota.unordered.bytes.per.second";
@@ -418,6 +414,11 @@ public class ConfigKeys {
   public static final String REPUSH_ORCHESTRATOR_CLASS_NAME = "controller.repush.orchestrator.class.name";
 
   /**
+   * Class names of the implementation of interface {@link com.linkedin.venice.controller.logcompaction.CandidateFilter} in {@link com.linkedin.venice.controller.logcompaction.CompactionManager}
+   */
+  public static final String REPUSH_CANDIDATE_FILTER_CLASS_NAMES = "controller.repush.candidate.filter.class.names";
+
+  /**
    * Prefix of configs to configure RepushOrchestrator
    */
   public static final String CONTROLLER_REPUSH_PREFIX = "controller.repush.";
@@ -445,6 +446,17 @@ public class ConfigKeys {
    * Time since last log compaction before a store is considered for log compaction
    */
   public static final String LOG_COMPACTION_THRESHOLD_MS = "log.compaction.threshold.ms";
+
+  /**
+   * Version staleness threshold to decide when a store should be nominated for compaction
+   */
+  public static final String LOG_COMPACTION_VERSION_STALENESS_THRESHOLD_MS =
+      "log.compaction.version.staleness.threshold.ms";
+
+  /**
+   * Duplicate key threshold to decide when a store should be nominated for compaction
+   */
+  public static final String LOG_COMPACTION_DUPLICATE_KEY_THRESHOLD = "log.compaction.duplicate.key.threshold";
 
   /**
    * This config is to indicate the max retention policy we have setup for deprecated jobs currently and in the past.
@@ -613,6 +625,13 @@ public class ConfigKeys {
    * */
   public static final String CONTROLLER_STORE_GRAVEYARD_CLEANUP_SLEEP_INTERVAL_BETWEEN_LIST_FETCH_MINUTES =
       "controller.store.graveyard.cleanup.sleep.interval.between.list.fetch.minutes";
+
+  /**
+   * Minimum time window in seconds that must pass after a store is deleted before it can be recreated.
+   * This prevents accidental recreation of recently deleted stores. Default is 21600 seconds (6 hours).
+   */
+  public static final String CONTROLLER_STORE_RECREATION_AFTER_DELETION_TIME_WINDOW_SECONDS =
+      "controller.store.recreation.after.deletion.time.window.seconds";
 
   /**
    * Whether the superset schema generation in Parent Controller should be done via passed callback or not.
@@ -1031,6 +1050,17 @@ public class ConfigKeys {
       "server.adaptive.throttler.multi.get.latency.threshold";
   public static final String SERVER_ADAPTIVE_THROTTLER_READ_COMPUTE_GET_LATENCY_THRESHOLD =
       "server.adaptive.throttler.read.compute.latency.threshold";
+
+  /**
+   * Config to enable parallel resource shutdown operation to speed up overall ingestion task shutdown.
+   */
+  public static final String SERVER_PARALLEL_RESOURCE_SHUTDOWN_ENABLED = "server.parallel.resource.shutdown.enabled";
+
+  /**
+   * Config for adaptive throttler signal refresh interval in seconds.
+   */
+  public static final String SERVER_ADAPTIVE_THROTTLER_SIGNAL_REFRESH_INTERVAL_IN_SECONDS =
+      "server.adaptive.throttler.signal.refresh.interval.in.seconds";
 
   /**
    * A list of fully-qualified class names of all stats classes that needs to be initialized in isolated ingestion process,
@@ -1742,6 +1772,18 @@ public class ConfigKeys {
   public static final String ROUTER_STATEFUL_HEALTHCHECK_ENABLED = "router.stateful.healthcheck.enabled";
 
   /**
+   * Enable latency-based routing for host selection.
+   * When enabled, uses average response latency as the criterion with a 1.5x spectrum
+   * threshold among the healthy host list. Ref AVG_LATENCY_SPECTRUM_FOR_HOST_SELECTION
+   *
+   * When disabled (default), uses pending request count to decide on the host selection
+   * among the healthy host list.
+   *
+   * Note: Healthy host list is based on VeniceHostHealth#isHostHealthy.
+   */
+  public static final String ROUTER_LATENCY_BASED_ROUTING_ENABLED = "router.latency.based.routing.enabled";
+
+  /**
   * Maximum number of pending router request per storage node after which router concludes that host to be unhealthy
   * and stops sending further request to it..
   */
@@ -2184,6 +2226,14 @@ public class ConfigKeys {
    */
   public static final String CONTROLLER_DISABLE_PARENT_REQUEST_TOPIC_FOR_STREAM_PUSHES =
       "controller.disable.parent.request.topic.for.stream.pushes";
+
+  /**
+   * Config to enable overriding PubSub bootstrap servers for stream push jobs based on source grid fabric.
+   * When enabled, if a source grid fabric is specified in the request, the controller will use the
+   * PubSub bootstrap servers for that fabric instead of the default local Kafka cluster.
+   */
+  public static final String CONTROLLER_ENABLE_STREAM_PUSH_SOURCE_GRID_FABRIC_OVERRIDE =
+      "controller.enable.stream.push.source.grid.fabric.override";
 
   public static final String CONTROLLER_DEFAULT_READ_QUOTA_PER_ROUTER = "controller.default.read.quota.per.router";
 
@@ -2766,6 +2816,11 @@ public class ConfigKeys {
       "deferred.version.swap.region.roll.forward.order";
 
   /**
+   * Specifies the number of threads for DeferredVersionSwapService
+   */
+  public static final String DEFERRED_VERSION_SWAP_THREAD_POOL_SIZE = "deferred.version.swap.thread.pool.size";
+
+  /**
    * Enables / disables allowing dvc clients to perform a target region push with deferred swap. When enabled, dvc clients
    * will be skipped and target regions will not be set and the deferred version swap service will skip checking stores with
    * isDavinciHeartbeatReported set to true. This is a temporary config until delayed ingestion for dvc is complete. Default value is enabled
@@ -2885,6 +2940,17 @@ public class ConfigKeys {
   public static final String STORE_MIGRATION_MAX_RETRY_ATTEMPTS = "store.migration.max.retry.attempts";
 
   /**
+   * (Only matters if MULTITASK_SCHEDULER_SERVICE_ENABLED true). Class name of {@link com.linkedin.venice.controller.multitaskscheduler.MultiTaskSchedulerService} implementation
+   */
+  public static final String STORE_MIGRATION_FABRIC_LIST = "store.migration.fabric.list";
+
+  /**
+   * (Only matters if MULTITASK_SCHEDULER_SERVICE_ENABLED true). Class name of {@link com.linkedin.venice.controller.multitaskscheduler.MultiTaskSchedulerService} implementation
+   */
+  public static final String STORE_MIGRATION_TASK_SCHEDULING_INTERVAL_SECONDS =
+      "store.migration.task.scheduling.interval.seconds";
+
+  /**
    * The strategy for how to share memory-heavy objects used in the ingestion hot path.
    */
   public static final String SERVER_INGESTION_TASK_REUSABLE_OBJECTS_STRATEGY =
@@ -2909,4 +2975,23 @@ public class ConfigKeys {
 
   public static final String SERVER_INGESTION_ISOLATION_D2_CLIENT_ENABLED =
       "server.ingestion.isolation.d2.client.enabled";
+
+  /**
+   * When dumping topic partition info for each consumer, there will be one line for each partition. This limit will
+   * prevent generating log lines for this consumer, if this consumer taking higher partition number than this limit.
+   */
+  public static final String SERVER_INGESTION_INFO_LOG_LINE_LIMIT = "server.ingestion.info.log.line.limit";
+
+  /**
+   * Experiment config to skip the compaction policy update for hybrid store real-time topic during update store operation
+   */
+  public static final String SKIP_HYBRID_STORE_RT_TOPIC_COMPACTION_POLICY_UPDATE_ENABLED =
+      "skip.hybrid.store.rt.topic.compaction.policy.update.enabled";
+  /**
+   * Whether the child controller in each data center will use the MultiRegionRealTimeTopicSwitcher to send version swap
+   * messages to the RT topics in remote data centers.
+   * Default is false (i.e. use the RealTimeTopicSwitcher to only write to local RT topic).
+   */
+  public static final String CONTROLLER_USE_MULTI_REGION_REAL_TIME_TOPIC_SWITCHER_ENABLED =
+      "controller.use.multi.region.real.time.topic.switcher.enabled";
 }

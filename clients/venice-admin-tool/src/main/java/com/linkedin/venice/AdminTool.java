@@ -53,6 +53,7 @@ import com.linkedin.venice.controllerapi.NodeReplicasReadinessResponse;
 import com.linkedin.venice.controllerapi.NodeStatusResponse;
 import com.linkedin.venice.controllerapi.OwnerResponse;
 import com.linkedin.venice.controllerapi.PartitionResponse;
+import com.linkedin.venice.controllerapi.PubSubPositionJsonWireFormat;
 import com.linkedin.venice.controllerapi.PubSubTopicConfigResponse;
 import com.linkedin.venice.controllerapi.ReadyForDataRecoveryResponse;
 import com.linkedin.venice.controllerapi.RepushJobResponse;
@@ -117,6 +118,7 @@ import com.linkedin.venice.serialization.avro.InternalAvroSpecificSerializer;
 import com.linkedin.venice.serializer.FastSerializerDeserializerFactory;
 import com.linkedin.venice.serializer.RecordDeserializer;
 import com.linkedin.venice.utils.ConfigCommonUtils;
+import com.linkedin.venice.utils.DaemonThreadFactory;
 import com.linkedin.venice.utils.ObjectMapperFactory;
 import com.linkedin.venice.utils.RetryUtils;
 import com.linkedin.venice.utils.SslUtils;
@@ -306,19 +308,20 @@ public class AdminTool {
           printObject(response);
           break;
         case SKIP_ADMIN_MESSAGE:
-          if (!cmd.hasOption(Arg.OFFSET.first()) && !cmd.hasOption(Arg.EXECUTION_ID.first())) {
+          if (!cmd.hasOption(Arg.POSITION.first()) && !cmd.hasOption(Arg.EXECUTION_ID.first())) {
             printErrAndExit(
-                "At least one of " + Arg.OFFSET.getArgName() + " or " + Arg.EXECUTION_ID.getArgName()
+                "At least one of " + Arg.POSITION.getArgName() + " or " + Arg.EXECUTION_ID.getArgName()
                     + " is required.");
           }
-          if (cmd.hasOption(Arg.OFFSET.first()) && cmd.hasOption(Arg.EXECUTION_ID.first())) {
+          if (cmd.hasOption(Arg.POSITION.first()) && cmd.hasOption(Arg.EXECUTION_ID.first())) {
             printErrAndExit(
-                "Only one of " + Arg.OFFSET.getArgName() + " or " + Arg.EXECUTION_ID.getArgName() + " is allowed.");
+                "Only one of " + Arg.POSITION.getArgName() + " or " + Arg.EXECUTION_ID.getArgName() + " is allowed.");
           }
-          String offset = getOptionalArgument(cmd, Arg.OFFSET);
+          String typeIdAndBase64PositionBytes = getOptionalArgument(cmd, Arg.POSITION);
+
           String executionId = getOptionalArgument(cmd, Arg.EXECUTION_ID);
           boolean skipDIV = Boolean.parseBoolean(getOptionalArgument(cmd, Arg.SKIP_DIV, "false"));
-          response = controllerClient.skipAdminMessage(offset, skipDIV, executionId);
+          response = controllerClient.skipAdminMessage(typeIdAndBase64PositionBytes, skipDIV, executionId);
           printObject(response);
           break;
         case NEW_STORE:
@@ -1024,7 +1027,7 @@ public class AdminTool {
     }
 
     // Create thread pool and start parallel processing.
-    ExecutorService executorService = Executors.newFixedThreadPool(parallelism);
+    ExecutorService executorService = Executors.newFixedThreadPool(parallelism, new DaemonThreadFactory("AdminTool"));
     List<Future> futureList = new ArrayList<>();
     for (int i = 0; i < parallelism; i++) {
       BatchMaintenanceTaskRunner batchMaintenanceTaskRunner =
@@ -2492,6 +2495,8 @@ public class AdminTool {
     Optional<Boolean> abortOnFailure =
         Optional.ofNullable(getOptionalArgument(cmd, Arg.ABORT_ON_FAILURE)).map(Boolean::parseBoolean);
     Optional<Integer> currStep = Optional.ofNullable(getOptionalArgument(cmd, Arg.INITIAL_STEP)).map(Integer::parseInt);
+    Optional<Integer> pauseAfterStep =
+        Optional.ofNullable(getOptionalArgument(cmd, Arg.PAUSE_AFTER_STEP)).map(Integer::parseInt);
 
     if (srcClusterName.equals(destClusterName)) {
       throw new VeniceException("Source and destination cluster cannot be the same!");
@@ -2505,7 +2510,7 @@ public class AdminTool {
     assertStoreNotMigrating(srcControllerClient, storeName);
 
     StoreMigrationResponse storeMigrationResponse =
-        srcControllerClient.autoMigrateStore(storeName, destClusterName, currStep, abortOnFailure);
+        srcControllerClient.autoMigrateStore(storeName, destClusterName, currStep, pauseAfterStep, abortOnFailure);
     printObject(storeMigrationResponse);
 
     if (storeMigrationResponse.isError()) {
@@ -3130,12 +3135,18 @@ public class AdminTool {
         System.out.println(latestStep);
         AdminTopicMetadataResponse response =
             checkControllerResponse(srcFabricChildControllerClient.getAdminTopicMetadata(Optional.empty()));
+        long executionId = response.getExecutionId();
+        PubSubPositionJsonWireFormat position = response.getPosition();
+        PubSubPositionJsonWireFormat upstreamPosition = response.getUpstreamPosition();
+
+        System.out.println(
+            "step4: execution id: " + executionId + " position " + position + " upstream position " + upstreamPosition);
         checkControllerResponse(
             destFabricChildControllerClient.updateAdminTopicMetadata(
-                response.getExecutionId(),
+                executionId,
                 Optional.empty(),
-                Optional.of(response.getOffset()),
-                Optional.of(response.getUpstreamOffset())));
+                Optional.of(position),
+                Optional.of(upstreamPosition)));
       }
 
       latestStep = "step5: copying store metadata and starting data recovery for non-existent stores in dest fabric";
