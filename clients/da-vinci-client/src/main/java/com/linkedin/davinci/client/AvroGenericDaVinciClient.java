@@ -43,6 +43,7 @@ import com.linkedin.venice.common.VeniceSystemStoreType;
 import com.linkedin.venice.compute.ComputeRequestWrapper;
 import com.linkedin.venice.compute.ComputeUtils;
 import com.linkedin.venice.controllerapi.D2ServiceDiscoveryResponse;
+import com.linkedin.venice.exceptions.StoreDisabledException;
 import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.exceptions.VeniceUnsupportedOperationException;
 import com.linkedin.venice.meta.Store;
@@ -61,10 +62,13 @@ import com.linkedin.venice.utils.ComplementSet;
 import com.linkedin.venice.utils.DaemonThreadFactory;
 import com.linkedin.venice.utils.PropertyBuilder;
 import com.linkedin.venice.utils.ReferenceCounted;
+import com.linkedin.venice.utils.RetryUtils;
 import com.linkedin.venice.utils.VeniceProperties;
 import com.linkedin.venice.utils.concurrent.VeniceConcurrentHashMap;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -252,13 +256,24 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
       return Optional.empty();
     }
 
-    Store store = getBackend().getStoreRepository().getStoreOrThrow(getStoreName());
-    Version version = store.getVersion(getStoreVersion());
+    return RetryUtils.executeWithMaxAttempt(() -> {
+      Store store = getBackend().getStoreRepository().getStoreOrThrow(getStoreName());
+      Version version = store.getVersion(getStoreVersion());
 
-    if (version == null) {
-      throw new VeniceClientException("Version: " + getStoreVersion() + " does not exist for store: " + getStoreName());
-    }
-    return Optional.of(version);
+      if (version == null) {
+        getClientLogger()
+            .info("Version {} not found for store {}, refreshing repository", getStoreVersion(), getStoreName());
+        getBackend().getStoreRepository().refreshOneStore(getStoreName());
+        store = getBackend().getStoreRepository().getStoreOrThrow(getStoreName());
+        version = store.getVersion(getStoreVersion());
+
+        if (version == null) {
+          throw new VeniceClientException(
+              "Version: " + getStoreVersion() + " does not exist for store: " + getStoreName());
+        }
+      }
+      return Optional.of(version);
+    }, 3, Duration.ofSeconds(1), Collections.singletonList(VeniceClientException.class));
   }
 
   protected CompletableFuture<Void> seekToTail() {
@@ -393,6 +408,7 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
   @Override
   public CompletableFuture<V> get(K key, V reusableValue) {
     throwIfNotReady();
+    throwIfReadsDisabled();
     try (ReferenceCounted<VersionBackend> versionRef = storeBackend.getDaVinciCurrentVersion()) {
       VersionBackend versionBackend = versionRef.get();
       if (versionBackend == null) {
@@ -516,12 +532,14 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
   @Override
   public CompletableFuture<Map<K, V>> batchGet(Set<K> keys) throws VeniceClientException {
     throwIfNotReady();
+    throwIfReadsDisabled();
     return batchGetImplementation(keys);
   }
 
   // Visible for testing
   CompletableFuture<Map<K, V>> batchGetImplementation(Set<K> keys) {
     throwIfNotReady();
+    throwIfReadsDisabled();
     try (ReferenceCounted<VersionBackend> versionRef = storeBackend.getDaVinciCurrentVersion()) {
       VersionBackend versionBackend = versionRef.get();
       if (daVinciConfig.isCacheEnabled()) {
@@ -584,6 +602,7 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
     }
 
     throwIfNotReady();
+    throwIfReadsDisabled();
     try (ReferenceCounted<VersionBackend> versionRef = storeBackend.getDaVinciCurrentVersion()) {
       VersionBackend versionBackend = versionRef.get();
       if (versionBackend == null) {
@@ -644,6 +663,7 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
       ComputeRequestWrapper computeRequestWrapper,
       StreamingCallback<GenericRecord, GenericRecord> callback) {
     throwIfNotReady();
+    throwIfReadsDisabled();
     try (ReferenceCounted<VersionBackend> versionRef = storeBackend.getDaVinciCurrentVersion()) {
       VersionBackend versionBackend = versionRef.get();
       if (versionBackend == null) {
@@ -737,6 +757,24 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
     if (!isReady()) {
       throw new VeniceClientException("Da Vinci client is not ready, storeName=" + getStoreName());
     }
+  }
+
+  void throwIfReadsDisabled() {
+    Store store = getBackend().getStoreRepository().getStore(getStoreName());
+    if (store == null) {
+      throw new VeniceClientException("Store not found in repository: " + getStoreName());
+    }
+    if (!store.isEnableReads()) {
+      throw new StoreDisabledException(getStoreName(), "read");
+    }
+  }
+
+  @VisibleForTesting
+  public DaVinciBackend getDaVinciBackend() {
+    if (daVinciBackend == null) {
+      throw new VeniceClientException("DaVinci backend is not initialized, storeName=" + getStoreName());
+    }
+    return daVinciBackend.get();
   }
 
   protected AbstractAvroChunkingAdapter<V> getAvroChunkingAdapter() {

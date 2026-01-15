@@ -512,6 +512,7 @@ public class AdminExecutionTask implements Callable<Void> {
         .setTargetRegionSwapWaitTime(message.targetSwapRegionWaitTime)
         .setIsDavinciHeartbeatReported(message.isDaVinciHeartBeatReported)
         .setGlobalRtDivEnabled(message.globalRtDivEnabled)
+        .setFlinkVeniceViewsEnabled(message.flinkVeniceViewsEnabled)
         .setEnumSchemaEvolutionAllowed(message.enumSchemaEvolutionAllowed)
         .setKeyUrnCompressionEnabled(message.keyUrnCompressionEnabled)
         .setKeyUrnFields(message.keyUrnFields.stream().map(Object::toString).collect(Collectors.toList()));
@@ -675,6 +676,7 @@ public class AdminExecutionTask implements Callable<Void> {
         message.pushStreamSourceAddress == null ? null : message.pushStreamSourceAddress.toString();
     long rewindTimeInSecondsOverride = message.rewindTimeInSecondsOverride;
     int replicationMetadataVersionId = message.timestampMetadataVersionId;
+    int repushTtlSeconds = message.repushTtlSeconds;
     // Log the message
     LOGGER.info(
         "Processing add version message for store: {} in cluster: {} with version number: {}.",
@@ -723,7 +725,8 @@ public class AdminExecutionTask implements Callable<Void> {
             message.versionSwapDeferred,
             targetedRegions,
             repushSourceVersion,
-            currentRTVersionNumber);
+            currentRTVersionNumber,
+            repushTtlSeconds);
       }
     }
   }

@@ -13,6 +13,7 @@ import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.exceptions.VeniceNoClusterException;
 import com.linkedin.venice.hooks.StoreLifecycleHooks;
 import com.linkedin.venice.hooks.StoreVersionLifecycleEventOutcome;
+import com.linkedin.venice.meta.ConcurrentPushDetectionStrategy;
 import com.linkedin.venice.meta.LifecycleHooksRecord;
 import com.linkedin.venice.meta.ReadWriteStoreRepository;
 import com.linkedin.venice.meta.Store;
@@ -259,6 +260,9 @@ public class DeferredVersionSwapService extends AbstractVeniceService {
       return null;
     }
 
+    logMessageIfNotRedundant(
+        "Got version " + targetVersionNum + " with status " + version.get().getStatus() + " for store: " + storeName
+            + " in region " + region);
     return version.get();
   }
 
@@ -417,6 +421,9 @@ public class DeferredVersionSwapService extends AbstractVeniceService {
         }
     }
 
+    logMessageIfNotRedundant(
+        "Skipping store " + storeName + " as parent version " + targetVersionNum + " status is "
+            + targetVersion.getStatus());
     return false;
   }
 
@@ -654,6 +661,9 @@ public class DeferredVersionSwapService extends AbstractVeniceService {
       return nextEligibleRegion;
     }
 
+    logMessageIfNotRedundant(
+        "Did not find next eligble region to roll forward in for " + kafkaTopicName + " for version " + targetVersionNum
+            + " and status " + version.getStatus());
     return null;
   }
 
@@ -916,6 +926,7 @@ public class DeferredVersionSwapService extends AbstractVeniceService {
    * Marks a store as no longer being processed.
    */
   private void finishProcessingStore(String kafkaTopicName) {
+    logMessageIfNotRedundant("Finished processing store " + kafkaTopicName);
     storesBeingProcessed.remove(kafkaTopicName);
   }
 
@@ -961,6 +972,7 @@ public class DeferredVersionSwapService extends AbstractVeniceService {
 
           boolean sequentialRollForward = !StringUtils.isEmpty(rolloutOrderStr);
           for (Store parentStore: eligibleStoresToProcess) {
+            LOGGER.debug("Processing version swap of store: {}", parentStore);
             Version targetVersion = parentStore.getVersion(parentStore.getLargestUsedVersionNumber());
 
             // Check if store is already being processed
@@ -975,6 +987,7 @@ public class DeferredVersionSwapService extends AbstractVeniceService {
             clusterExecutorService.submit(() -> {
               try {
                 if (sequentialRollForward) {
+                  logMessageIfNotRedundant("Submitting sequential roll forward for store: " + parentStore.getName());
                   performSequentialRollForward(
                       cluster,
                       parentStore,
@@ -1225,7 +1238,10 @@ public class DeferredVersionSwapService extends AbstractVeniceService {
         // For jobs that stop polling early or for pushes that don't poll (empty push), we need to truncate the parent
         // VT here to unblock the next push
         String kafkaTopicName = Version.composeKafkaTopic(storeName, targetVersionNum);
-        if (!veniceParentHelixAdmin.isTopicTruncated(kafkaTopicName)) {
+        ConcurrentPushDetectionStrategy strategy =
+            veniceControllerMultiClusterConfig.getControllerConfig(clusterName).getConcurrentPushDetectionStrategy();
+        // skip truncating if the topic was not created based on ConcurrentPushDetectionStrategy
+        if (strategy.isTopicWriteNeeded() && !veniceParentHelixAdmin.isTopicTruncated(kafkaTopicName)) {
           LOGGER.info("Truncating parent VT for {}", kafkaTopicName);
           veniceParentHelixAdmin.truncateKafkaTopic(Version.composeKafkaTopic(storeName, targetVersionNum));
         }
