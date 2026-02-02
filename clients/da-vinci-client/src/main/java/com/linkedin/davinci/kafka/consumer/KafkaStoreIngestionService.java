@@ -82,6 +82,8 @@ import com.linkedin.venice.serialization.avro.KafkaValueSerializer;
 import com.linkedin.venice.serialization.avro.OptimizedKafkaValueSerializer;
 import com.linkedin.venice.service.AbstractVeniceService;
 import com.linkedin.venice.service.ICProvider;
+import com.linkedin.venice.stats.ThreadPoolStats;
+import com.linkedin.venice.stats.VeniceMetricsRepository;
 import com.linkedin.venice.system.store.ControllerClientBackedSystemSchemaInitializer;
 import com.linkedin.venice.system.store.MetaStoreWriter;
 import com.linkedin.venice.throttle.EventThrottler;
@@ -117,6 +119,7 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
@@ -495,6 +498,10 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
       this.aaWCWorkLoadProcessingThreadPool = Executors.newFixedThreadPool(
           serverConfig.getAAWCWorkloadParallelProcessingThreadPoolSize(),
           new DaemonThreadFactory("AA_WC_PARALLEL_PROCESSING", serverConfig.getLogContext()));
+      new ThreadPoolStats(
+          metricsRepository,
+          (ThreadPoolExecutor) aaWCWorkLoadProcessingThreadPool,
+          "aa_wc_parallel_processing_thread_pool");
     } else {
       this.aaWCWorkLoadProcessingThreadPool = null;
     }
@@ -508,6 +515,10 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
     this.aaWCIngestionStorageLookupThreadPool = Executors.newFixedThreadPool(
         serverConfig.getAaWCIngestionStorageLookupThreadPoolSize(),
         new DaemonThreadFactory("AA_WC_INGESTION_STORAGE_LOOKUP", serverConfig.getLogContext()));
+    new ThreadPoolStats(
+        metricsRepository,
+        (ThreadPoolExecutor) aaWCIngestionStorageLookupThreadPool,
+        "aa_wc_ingestion_storage_lookup_thread_pool");
     LOGGER.info(
         "Enabled a thread pool for AA/WC ingestion lookup with {} threads.",
         serverConfig.getAaWCIngestionStorageLookupThreadPoolSize());
@@ -542,6 +553,8 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
         .build();
   }
 
+  private static final String PARTICIPANT_STORE_CLIENT_METRIC_PREFIX = "participant_store_client";
+
   @VisibleForTesting
   ParticipantStoreConsumptionTask initializeParticipantStoreConsumptionTask(
       VeniceServerConfig serverConfig,
@@ -558,11 +571,21 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
       return null;
     }
 
+    MetricsRepository participantStoreMetricsRepository;
+    if (metricsRepository instanceof VeniceMetricsRepository) {
+      // Use a child metrics repository with a different prefix for participant store client metrics
+      // to distinguish them from server metrics
+      participantStoreMetricsRepository = ((VeniceMetricsRepository) metricsRepository)
+          .cloneWithNewMetricPrefix(PARTICIPANT_STORE_CLIENT_METRIC_PREFIX);
+    } else {
+      participantStoreMetricsRepository = metricsRepository;
+    }
+
     return new ParticipantStoreConsumptionTask(
         this,
         clusterInfoProvider,
         new ParticipantStoreConsumptionStats(metricsRepository, serverConfig.getClusterName()),
-        ClientConfig.cloneConfig(clientConfig.get()).setMetricsRepository(metricsRepository),
+        ClientConfig.cloneConfig(clientConfig.get()).setMetricsRepository(participantStoreMetricsRepository),
         serverConfig.getParticipantMessageConsumptionDelayMs(),
         icProvider);
   }
@@ -1467,6 +1490,11 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
   }
 
   @VisibleForTesting
+  public ParticipantStoreConsumptionTask getParticipantStoreConsumptionTask() {
+    return participantStoreConsumptionTask;
+  }
+
+  @VisibleForTesting
   protected Map<String, StoreIngestionTask> getTopicNameToIngestionTaskMap() {
     return topicNameToIngestionTaskMap;
   }
@@ -1544,4 +1572,7 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
     LOGGER.info("Added replica: {} to pending resubscribe queue.", Utils.getReplicaId(versionTopic, partition));
   }
 
+  public AggHostLevelIngestionStats getHostLevelIngestionStats() {
+    return hostLevelIngestionStats;
+  }
 }

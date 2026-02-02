@@ -521,13 +521,8 @@ public class VenicePushJob implements AutoCloseable {
     pushJobSettingToReturn.extendedSchemaValidityCheckEnabled =
         props.getBoolean(EXTENDED_SCHEMA_VALIDITY_CHECK_ENABLED, DEFAULT_EXTENDED_SCHEMA_VALIDITY_CHECK_ENABLED);
 
-    if (pushJobSettingToReturn.isSourceKafka) {
-      // KIF uses a different code-path to build a dictionary, and we also don't need schema validations for KIF
-      pushJobSettingToReturn.compressionMetricCollectionEnabled = false;
-    } else {
-      pushJobSettingToReturn.compressionMetricCollectionEnabled =
-          props.getBoolean(COMPRESSION_METRIC_COLLECTION_ENABLED, DEFAULT_COMPRESSION_METRIC_COLLECTION_ENABLED);
-    }
+    pushJobSettingToReturn.compressionMetricCollectionEnabled =
+        props.getBoolean(COMPRESSION_METRIC_COLLECTION_ENABLED, DEFAULT_COMPRESSION_METRIC_COLLECTION_ENABLED);
 
     // Compute-engine abstraction related configs
     String dataWriterComputeJobClass = props.getString(DATA_WRITER_COMPUTE_JOB_CLASS, (String) null);
@@ -759,7 +754,25 @@ public class VenicePushJob implements AutoCloseable {
       }
 
       Optional<ByteBuffer> optionalCompressionDictionary = getCompressionDictionary();
+      if (optionalCompressionDictionary.isPresent()) {
+        pushJobSetting.topicDictionary = ByteUtils.extractByteArray(optionalCompressionDictionary.get());
+      }
+
       if (pushJobSetting.isSourceKafka) {
+        if (pushJobSetting.sourceVersionCompressionStrategy == CompressionStrategy.ZSTD_WITH_DICT) {
+          LOGGER.info("Source version uses ZSTD_WITH_DICT. Fetching source dictionary.");
+          Properties kafkaConsumerProperties = new Properties();
+          if (pushJobSetting.enableSSL) {
+            kafkaConsumerProperties.putAll(this.sslProperties.get());
+          }
+          kafkaConsumerProperties.setProperty(KAFKA_BOOTSTRAP_SERVERS, pushJobSetting.kafkaInputBrokerUrl);
+          ByteBuffer sourceDict = DictionaryUtils
+              .readDictionaryFromKafka(pushJobSetting.kafkaInputTopic, new VeniceProperties(kafkaConsumerProperties));
+          if (sourceDict != null) {
+            pushJobSetting.sourceDictionary = ByteUtils.extractByteArray(sourceDict);
+          }
+        }
+
         if (pushJobSetting.sourceKafkaInputVersionInfo.getHybridStoreConfig() != null
             && pushJobSetting.rewindTimeInSecondsOverride == NOT_SET) {
           pushJobSetting.rewindTimeInSecondsOverride = DEFAULT_RE_PUSH_REWIND_IN_SECONDS_OVERRIDE;
@@ -1119,11 +1132,12 @@ public class VenicePushJob implements AutoCloseable {
           c -> c.getStore(pushJobSetting.storeName));
       Map<String, ViewConfig> viewConfigMap =
           storeResponse.getStore().getVersion(pushJobSetting.version).get().getViewConfigs();
+      boolean isFlinkVeniceViewsEnabled = storeResponse.getStore().isFlinkVeniceViewsEnabled();
       viewConfigMap = viewConfigMap.entrySet()
           .stream()
           .filter(vc -> Objects.equals(vc.getValue().getViewClassName(), MaterializedView.class.getCanonicalName()))
           .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-      if (!viewConfigMap.isEmpty()) {
+      if (!viewConfigMap.isEmpty() && !isFlinkVeniceViewsEnabled) {
         pushJobSetting.materializedViewConfigFlatMap = ViewUtils.flatViewConfigMapString(viewConfigMap);
       }
     } catch (Exception e) {
@@ -2659,8 +2673,7 @@ public class VenicePushJob implements AutoCloseable {
           StoreResponse parentStoreResponse = getStoreResponse(pushJobSetting.storeName, true);
 
           StoreInfo parentStoreInfo = parentStoreResponse.getStore();
-          int latestUsedVersionNumber = parentStoreInfo.getLargestUsedVersionNumber();
-          Optional<Version> parentVersionFromStore = parentStoreInfo.getVersion(latestUsedVersionNumber);
+          Optional<Version> parentVersionFromStore = parentStoreInfo.getVersion(pushJobSetting.version);
           if (!parentVersionFromStore.isPresent()) {
             LOGGER.warn("Failed to get parent version for store: {}", pushJobSetting.storeName);
             fetchParentVersionRetryCount++;
@@ -2709,7 +2722,10 @@ public class VenicePushJob implements AutoCloseable {
                     + " minutes, version swap is still not complete.");
           }
 
-          LOGGER.info("Version status is {} and version swap is not complete yet", parentVersion.getStatus());
+          LOGGER.info(
+              "Version status is {} for {} and version swap is not complete yet",
+              parentVersion.getStatus(),
+              pushJobSetting.version);
         } else if (isTargetedRegionPush) {
           LOGGER.info("Successfully pushed {} to targeted region {}", pushJobSetting.topic, targetedRegions);
           return;

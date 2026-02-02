@@ -118,6 +118,7 @@ import com.linkedin.venice.serialization.avro.InternalAvroSpecificSerializer;
 import com.linkedin.venice.serializer.AvroGenericDeserializer;
 import com.linkedin.venice.serializer.FastSerializerDeserializerFactory;
 import com.linkedin.venice.serializer.RecordDeserializer;
+import com.linkedin.venice.server.VersionRole;
 import com.linkedin.venice.storage.protocol.ChunkedValueManifest;
 import com.linkedin.venice.system.store.MetaStoreWriter;
 import com.linkedin.venice.utils.ByteUtils;
@@ -403,7 +404,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
   private final String[] msgForLagMeasurement;
   protected final AtomicBoolean recordLevelMetricEnabled;
   protected final boolean isGlobalRtDivEnabled;
-  protected volatile PartitionReplicaIngestionContext.VersionRole versionRole;
+  protected volatile VersionRole versionRole;
   protected volatile PartitionReplicaIngestionContext.WorkloadType workloadType;
   protected final boolean batchReportIncPushStatusEnabled;
 
@@ -1689,7 +1690,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
     }
 
     boolean isWriteComputeEnabled = store.isWriteComputationEnabled();
-    PartitionReplicaIngestionContext.VersionRole newVersionRole =
+    VersionRole newVersionRole =
         PartitionReplicaIngestionContext.determineStoreVersionRole(versionNumber, currentVersionNumber);
     PartitionReplicaIngestionContext.WorkloadType newWorkloadType =
         PartitionReplicaIngestionContext.determineWorkloadType(isActiveActiveReplicationEnabled, isWriteComputeEnabled);
@@ -3538,14 +3539,6 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
             partitionConsumptionState,
             leaderProducedRecordContext,
             currentTimeMs);
-        if (recordLevelMetricEnabled.get()) {
-          recordNearlineLocalBrokerToReadyToServerLatency(
-              storeName,
-              versionNumber,
-              partitionConsumptionState,
-              kafkaValue,
-              leaderProducedRecordContext);
-        }
       }
       if (recordLevelMetricEnabled.get()) {
         versionedIngestionStats.recordConsumedRecordEndToEndProcessingLatency(
@@ -4803,48 +4796,6 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
     SKIPPED_MESSAGE
   }
 
-  /**
-   * The method measures the time between receiving the message from the local VT and when the message is committed in
-   * the local db and ready to serve.
-   * For a leader, it's the time when the callback to the version topic write returns.
-   */
-  private void recordNearlineLocalBrokerToReadyToServerLatency(
-      String storeName,
-      int versionNumber,
-      PartitionConsumptionState partitionConsumptionState,
-      KafkaMessageEnvelope kafkaMessageEnvelope,
-      LeaderProducedRecordContext leaderProducedRecordContext) {
-    /**
-     * Record nearline latency only when it's a hybrid store, the lag has been caught up and ignore
-     * messages that are getting caughtup. Sometimes the producerTimestamp can be -1 if the
-     * leaderProducedRecordContext had an error after callback. Don't record latency for invalid timestamps.
-     */
-    if (!isUserSystemStore() && isHybridMode() && partitionConsumptionState.hasLagCaughtUp()) {
-      long producerTimestamp = (leaderProducedRecordContext == null)
-          ? kafkaMessageEnvelope.producerMetadata.messageTimestamp
-          : leaderProducedRecordContext.getProducedTimestampMs();
-      if (producerTimestamp > 0) {
-        if (partitionConsumptionState.isNearlineMetricsRecordingValid(producerTimestamp)) {
-          long afterProcessingRecordTimestampMs = System.currentTimeMillis();
-          versionedIngestionStats.recordNearlineLocalBrokerToReadyToServeLatency(
-              storeName,
-              versionNumber,
-              afterProcessingRecordTimestampMs - producerTimestamp,
-              afterProcessingRecordTimestampMs);
-        }
-      } else if (!REDUNDANT_LOGGING_FILTER.isRedundantException(storeName, "IllegalTimestamp")) {
-        LOGGER.warn(
-            "Illegal timestamp for storeName: {}, versionNumber: {}, replica: {}, "
-                + "leaderProducedRecordContext: {}, producerTimestamp: {}",
-            storeName,
-            versionNumber,
-            partitionConsumptionState.getReplicaId(),
-            leaderProducedRecordContext == null ? "NA" : leaderProducedRecordContext,
-            producerTimestamp);
-      }
-    }
-  }
-
   protected void recordProcessedRecordStats(
       PartitionConsumptionState partitionConsumptionState,
       int processedRecordSize) {
@@ -5043,7 +4994,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
   }
 
   // For unit test purpose.
-  void setVersionRole(PartitionReplicaIngestionContext.VersionRole versionRole) {
+  void setVersionRole(VersionRole versionRole) {
     this.versionRole = versionRole;
   }
 
