@@ -39,9 +39,9 @@ public class SparkServerStatsTest extends AbstractTestVeniceParentHelixAdmin {
   public void setUp() throws Exception {
     // add all the metrics that are used in the test
     Collection<MetricEntity> metricEntities = Arrays.asList(
-        ControllerMetricEntity.INFLIGHT_CALL_COUNT.getMetricEntity(),
-        ControllerMetricEntity.CALL_COUNT.getMetricEntity(),
-        ControllerMetricEntity.CALL_TIME.getMetricEntity());
+        SparkServerStats.SparkServerOtelMetricEntity.INFLIGHT_CALL_COUNT.getMetricEntity(),
+        SparkServerStats.SparkServerOtelMetricEntity.CALL_COUNT.getMetricEntity(),
+        SparkServerStats.SparkServerOtelMetricEntity.CALL_TIME.getMetricEntity());
 
     // setup metric reader to validate metric emission
     this.inMemoryMetricReader = InMemoryMetricReader.create();
@@ -83,7 +83,7 @@ public class SparkServerStatsTest extends AbstractTestVeniceParentHelixAdmin {
     // test validation
     String clusterName = genericCluster ? SparkServerStats.NON_CLUSTER_SPECIFIC_STAT_CLUSTER_NAME : TEST_CLUSTER_NAME;
     validateLongPointFromDataFromCounter(
-        ControllerMetricEntity.INFLIGHT_CALL_COUNT.getMetricName(),
+        SparkServerStats.SparkServerOtelMetricEntity.INFLIGHT_CALL_COUNT.getMetricName(),
         1,
         Attributes.builder()
             .put(VENICE_CLUSTER_NAME.getDimensionNameInDefaultFormat(), clusterName)
@@ -120,7 +120,7 @@ public class SparkServerStatsTest extends AbstractTestVeniceParentHelixAdmin {
     // Test validation
     String clusterName = genericCluster ? SparkServerStats.NON_CLUSTER_SPECIFIC_STAT_CLUSTER_NAME : TEST_CLUSTER_NAME;
     validateLongPointFromDataFromCounter(
-        ControllerMetricEntity.INFLIGHT_CALL_COUNT.getMetricName(),
+        SparkServerStats.SparkServerOtelMetricEntity.INFLIGHT_CALL_COUNT.getMetricName(),
         1,
         Attributes.builder()
             .put(VENICE_CLUSTER_NAME.getDimensionNameInDefaultFormat(), clusterName)
@@ -135,7 +135,7 @@ public class SparkServerStatsTest extends AbstractTestVeniceParentHelixAdmin {
 
     // Test validation
     validateLongPointFromDataFromCounter(
-        ControllerMetricEntity.CALL_COUNT.getMetricName(),
+        SparkServerStats.SparkServerOtelMetricEntity.CALL_COUNT.getMetricName(),
         1,
         Attributes.builder()
             .put(VENICE_CLUSTER_NAME.getDimensionNameInDefaultFormat(), clusterName)
@@ -151,7 +151,7 @@ public class SparkServerStatsTest extends AbstractTestVeniceParentHelixAdmin {
                 VeniceResponseStatusCategory.SUCCESS.getDimensionValue())
             .build());
     validateLongPointFromDataFromCounter(
-        ControllerMetricEntity.INFLIGHT_CALL_COUNT.getMetricName(),
+        SparkServerStats.SparkServerOtelMetricEntity.INFLIGHT_CALL_COUNT.getMetricName(),
         0,
         Attributes.builder()
             .put(VENICE_CLUSTER_NAME.getDimensionNameInDefaultFormat(), clusterName)
@@ -160,7 +160,7 @@ public class SparkServerStatsTest extends AbstractTestVeniceParentHelixAdmin {
                 ControllerRoute.valueOfPath(testPath).toString().toLowerCase())
             .build());
     validateExponentialHistogramPointData(
-        ControllerMetricEntity.CALL_TIME.getMetricName(),
+        SparkServerStats.SparkServerOtelMetricEntity.CALL_TIME.getMetricName(),
         testCallTime,
         testCallTime,
         1,
@@ -206,7 +206,7 @@ public class SparkServerStatsTest extends AbstractTestVeniceParentHelixAdmin {
     // Test validation
     String clusterName = genericCluster ? SparkServerStats.NON_CLUSTER_SPECIFIC_STAT_CLUSTER_NAME : TEST_CLUSTER_NAME;
     validateLongPointFromDataFromCounter(
-        ControllerMetricEntity.INFLIGHT_CALL_COUNT.getMetricName(),
+        SparkServerStats.SparkServerOtelMetricEntity.INFLIGHT_CALL_COUNT.getMetricName(),
         1,
         Attributes.builder()
             .put(VENICE_CLUSTER_NAME.getDimensionNameInDefaultFormat(), clusterName)
@@ -221,7 +221,7 @@ public class SparkServerStatsTest extends AbstractTestVeniceParentHelixAdmin {
 
     // Test validation
     validateLongPointFromDataFromCounter(
-        ControllerMetricEntity.CALL_COUNT.getMetricName(),
+        SparkServerStats.SparkServerOtelMetricEntity.CALL_COUNT.getMetricName(),
         1,
         Attributes.builder()
             .put(VENICE_CLUSTER_NAME.getDimensionNameInDefaultFormat(), clusterName)
@@ -237,7 +237,7 @@ public class SparkServerStatsTest extends AbstractTestVeniceParentHelixAdmin {
                 VeniceResponseStatusCategory.FAIL.getDimensionValue())
             .build());
     validateLongPointFromDataFromCounter(
-        ControllerMetricEntity.INFLIGHT_CALL_COUNT.getMetricName(),
+        SparkServerStats.SparkServerOtelMetricEntity.INFLIGHT_CALL_COUNT.getMetricName(),
         0,
         Attributes.builder()
             .put(VENICE_CLUSTER_NAME.getDimensionNameInDefaultFormat(), clusterName)
@@ -246,7 +246,7 @@ public class SparkServerStatsTest extends AbstractTestVeniceParentHelixAdmin {
                 ControllerRoute.valueOfPath(testPath).toString().toLowerCase())
             .build());
     validateExponentialHistogramPointData(
-        ControllerMetricEntity.CALL_TIME.getMetricName(),
+        SparkServerStats.SparkServerOtelMetricEntity.CALL_TIME.getMetricName(),
         testCallTime,
         testCallTime,
         1,

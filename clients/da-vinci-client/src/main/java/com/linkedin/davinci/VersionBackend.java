@@ -4,7 +4,6 @@ import static com.linkedin.venice.ConfigKeys.PUSH_STATUS_STORE_ENABLED;
 import static com.linkedin.venice.ConfigKeys.PUSH_STATUS_STORE_HEARTBEAT_INTERVAL_IN_SECONDS;
 import static com.linkedin.venice.ConfigKeys.SERVER_STOP_CONSUMPTION_TIMEOUT_IN_SECONDS;
 
-import com.linkedin.davinci.client.DaVinciSeekCheckpointInfo;
 import com.linkedin.davinci.client.InternalDaVinciRecordTransformerConfig;
 import com.linkedin.davinci.config.VeniceStoreVersionConfig;
 import com.linkedin.davinci.listener.response.NoOpReadResponseStats;
@@ -17,7 +16,6 @@ import com.linkedin.venice.compression.VeniceCompressor;
 import com.linkedin.venice.compute.ComputeRequestWrapper;
 import com.linkedin.venice.compute.ComputeUtils;
 import com.linkedin.venice.exceptions.VeniceException;
-import com.linkedin.venice.meta.IngestionMode;
 import com.linkedin.venice.meta.Store;
 import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.partitioner.VenicePartitioner;
@@ -28,6 +26,7 @@ import com.linkedin.venice.serialization.StoreDeserializerCache;
 import com.linkedin.venice.serializer.RecordDeserializer;
 import com.linkedin.venice.utils.ComplementSet;
 import com.linkedin.venice.utils.ExceptionUtils;
+import com.linkedin.venice.utils.LogContext;
 import com.linkedin.venice.utils.PartitionUtils;
 import com.linkedin.venice.utils.Utils;
 import com.linkedin.venice.utils.concurrent.VeniceConcurrentHashMap;
@@ -93,22 +92,16 @@ public class VersionBackend {
     this.config = backend.getConfigLoader().getStoreConfig(version.kafkaTopicName());
     this.batchReportEOIPStatusEnabled = config.getBatchReportEOIPEnabled();
 
-    if (this.config.getIngestionMode().equals(IngestionMode.ISOLATED)) {
-      /*
-       * Explicitly disable the store restore since we don't want to open other partitions that should be controlled by
-       * child process. All the finished partitions will be closed by child process and reopened in parent process.
-       */
-      this.config.setRestoreDataPartitions(false);
-      this.config.setRestoreMetadataPartition(false);
-    }
     this.partitioner = PartitionUtils.getUserPartitionLevelVenicePartitioner(version.getPartitionerConfig());
     this.suppressLiveUpdates = this.config.freezeIngestionIfReadyToServeOrLocalDataExists();
     this.storageEngine.set(backend.getStorageService().getStorageEngine(version.kafkaTopicName()));
     this.backend.getIngestionBackend().setStorageEngineReference(version.kafkaTopicName(), storageEngine);
     Store store = backend.getStoreRepository().getStoreOrThrow(version.getStoreName());
     this.storeBackendStats = storeBackendStats;
-    // push status store must be enabled both in Da Vinci and the store
-    this.reportPushStatus = store.isDaVinciPushStatusStoreEnabled()
+    // push status store must be enabled both in Da Vinci and the store, and disabled for version-specific clients
+    boolean isVersionSpecificClient =
+        DaVinciBackend.ClientType.VERSION_SPECIFIC.equals(backend.getStoreClientType(version.getStoreName()));
+    this.reportPushStatus = !isVersionSpecificClient && store.isDaVinciPushStatusStoreEnabled()
         && this.config.getClusterProperties().getBoolean(PUSH_STATUS_STORE_ENABLED, false);
     this.heartbeatInterval = this.config.getClusterProperties()
         .getInt(PUSH_STATUS_STORE_HEARTBEAT_INTERVAL_IN_SECONDS, DEFAULT_PUSH_STATUS_HEARTBEAT_INTERVAL_IN_SECONDS);
@@ -124,11 +117,14 @@ public class VersionBackend {
     backend.getVersionByTopicMap().put(version.kafkaTopicName(), this);
     long daVinciPushStatusCheckIntervalInMs = this.config.getDaVinciPushStatusCheckIntervalInMs();
     if (daVinciPushStatusCheckIntervalInMs >= 0) {
+      LogContext logContext =
+          backend.getConfigLoader() != null ? backend.getConfigLoader().getVeniceServerConfig().getLogContext() : null;
       this.daVinciPushStatusUpdateTask = new DaVinciPushStatusUpdateTask(
           version,
           daVinciPushStatusCheckIntervalInMs,
           backend.getPushStatusStoreWriter(),
-          this::areAllPartitionFuturesCompletedSuccessfully);
+          this::areAllPartitionFuturesCompletedSuccessfully,
+          logContext);
     } else {
       this.daVinciPushStatusUpdateTask = null;
     }
@@ -366,7 +362,8 @@ public class VersionBackend {
 
   synchronized CompletableFuture<Void> subscribe(
       ComplementSet<Integer> partitions,
-      DaVinciSeekCheckpointInfo checkpointInfo) {
+      Map<Integer, Long> timestampsMap,
+      Map<Integer, PubSubPosition> positionMap) {
     Instant startTime = Instant.now();
     List<Integer> partitionList = getPartitions(partitions);
     if (partitionList.isEmpty()) {
@@ -404,19 +401,19 @@ public class VersionBackend {
     }
 
     for (int partition: partitionsToStartConsumption) {
+      String replicaId = Utils.getReplicaId(version.kafkaTopicName(), partition);
       // Start monitoring the heartbeat lag of the partition
       backend.getHeartbeatMonitoringService()
-          .updateLagMonitor(version.kafkaTopicName(), partition, HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR);
+          .updateLagMonitor(
+              version.kafkaTopicName(),
+              partition,
+              HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR,
+              replicaId);
       // AtomicReference of storage engine will be updated internally.
-      Optional<PubSubPosition> pubSubPosition = checkpointInfo == null
+      Optional<PubSubPosition> pubSubPosition = (timestampsMap == null && positionMap == null)
           ? Optional.empty()
-          : backend.getIngestionService()
-              .getPubSubPosition(
-                  config,
-                  partition,
-                  checkpointInfo.getTimestampsMap(),
-                  checkpointInfo.getPostitionMap());
-      backend.getIngestionBackend().startConsumption(config, partition, pubSubPosition);
+          : backend.getIngestionService().getPubSubPosition(config, partition, timestampsMap, positionMap);
+      backend.getIngestionBackend().startConsumption(config, partition, pubSubPosition, replicaId);
       tryStartHeartbeat();
     }
 
@@ -471,9 +468,11 @@ public class VersionBackend {
         return;
       }
       completePartition(partition);
+      String replicaId = Utils.getReplicaId(version.kafkaTopicName(), partition);
       backend.getHeartbeatMonitoringService()
-          .updateLagMonitor(version.kafkaTopicName(), partition, HeartbeatLagMonitorAction.REMOVE_MONITOR);
-      backend.getIngestionBackend().dropStoragePartitionGracefully(config, partition, stopConsumptionTimeoutInSeconds);
+          .updateLagMonitor(version.kafkaTopicName(), partition, HeartbeatLagMonitorAction.REMOVE_MONITOR, replicaId);
+      backend.getIngestionBackend()
+          .dropStoragePartitionGracefully(config, partition, stopConsumptionTimeoutInSeconds, replicaId);
       partitionFutures.remove(partition);
       partitionToPendingReportIncrementalPushList.remove(partition);
       partitionToBatchReportEOIPEnabled.remove(partition);

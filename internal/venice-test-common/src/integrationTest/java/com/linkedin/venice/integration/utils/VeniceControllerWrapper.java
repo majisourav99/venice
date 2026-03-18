@@ -54,6 +54,7 @@ import static com.linkedin.venice.ConfigKeys.TOPIC_CLEANUP_DELAY_FACTOR;
 import static com.linkedin.venice.ConfigKeys.TOPIC_CLEANUP_SLEEP_INTERVAL_BETWEEN_TOPIC_LIST_FETCH_MS;
 import static com.linkedin.venice.SSLConfig.DEFAULT_CONTROLLER_SSL_ENABLED;
 import static com.linkedin.venice.integration.utils.VeniceClusterWrapperConstants.CHILD_REGION_NAME_PREFIX;
+import static com.linkedin.venice.stats.VeniceMetricsConfig.OTEL_VENICE_METRICS_ENABLED;
 
 import com.linkedin.d2.balancer.D2Client;
 import com.linkedin.venice.acl.VeniceComponent;
@@ -62,6 +63,7 @@ import com.linkedin.venice.controller.Admin;
 import com.linkedin.venice.controller.VeniceController;
 import com.linkedin.venice.controller.VeniceControllerContext;
 import com.linkedin.venice.controller.VeniceHelixAdmin;
+import com.linkedin.venice.controller.init.SystemStoreInitializationHelper;
 import com.linkedin.venice.controller.kafka.consumer.AdminConsumerService;
 import com.linkedin.venice.controller.supersetschema.SupersetSchemaGenerator;
 import com.linkedin.venice.d2.D2Server;
@@ -69,6 +71,7 @@ import com.linkedin.venice.meta.PersistenceType;
 import com.linkedin.venice.pubsub.PubSubClientsFactory;
 import com.linkedin.venice.pubsub.api.PubSubSecurityProtocol;
 import com.linkedin.venice.servicediscovery.ServiceDiscoveryAnnouncer;
+import com.linkedin.venice.stats.VeniceMetricsConfig;
 import com.linkedin.venice.stats.VeniceMetricsRepository;
 import com.linkedin.venice.utils.LogContext;
 import com.linkedin.venice.utils.PropertyBuilder;
@@ -76,8 +79,10 @@ import com.linkedin.venice.utils.SslUtils;
 import com.linkedin.venice.utils.TestUtils;
 import com.linkedin.venice.utils.Utils;
 import com.linkedin.venice.utils.VeniceProperties;
+import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader;
 import io.tehuti.metrics.MetricsRepository;
 import java.io.File;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -152,6 +157,11 @@ public class VeniceControllerWrapper extends ProcessWrapper {
   }
 
   static StatefulServiceProvider<VeniceControllerWrapper> generateService(VeniceControllerCreateOptions options) {
+    // Reduce retry delay for system store initialization from 10s to 1s in integration tests.
+    // The production default (10s) causes participant store setup to take up to 150s under load,
+    // frequently exceeding test timeouts.
+    SystemStoreInitializationHelper.setDelayBetweenStoreUpdateRetries(Duration.ofSeconds(1));
+
     return (serviceName, dataDirectory) -> {
       int adminPort = TestUtils.getFreePort();
       int adminSecurePort = TestUtils.getFreePort();
@@ -235,6 +245,7 @@ public class VeniceControllerWrapper extends ProcessWrapper {
                 PUBSUB_CONSUMER_ADAPTER_FACTORY_CLASS,
                 pubSubClientsFactory.getConsumerAdapterFactory().getClass().getName())
             .put(PUBSUB_ADMIN_ADAPTER_FACTORY_CLASS, pubSubClientsFactory.getAdminAdapterFactory().getClass().getName())
+            .put(OTEL_VENICE_METRICS_ENABLED, Boolean.TRUE.toString())
             .put(extraProps.toProperties())
             // Set store recreation time window to 0 seconds by default to allow immediate recreation in tests
             // This is set after extraProps so tests can override it if needed
@@ -364,12 +375,14 @@ public class VeniceControllerWrapper extends ProcessWrapper {
       }
 
       D2Client d2Client = D2TestUtils.getAndStartD2Client(options.getZkAddress());
-      MetricsRepository metricsRepository = VeniceMetricsRepository.getVeniceMetricsRepository(
-          D2_SERVICE_NAME,
-          VeniceController.CONTROLLER_SERVICE_METRIC_PREFIX,
-          VeniceController.CONTROLLER_SERVICE_METRIC_ENTITIES,
-          propertiesList.get(0).getAsMap() // TODO repush otel: not sure if properties is accessed this way
-      );
+      InMemoryMetricReader inMemoryMetricReader = InMemoryMetricReader.create();
+      VeniceMetricsRepository metricsRepository = new VeniceMetricsRepository(
+          new VeniceMetricsConfig.Builder().setServiceName(D2_SERVICE_NAME)
+              .setMetricPrefix(VeniceController.CONTROLLER_SERVICE_METRIC_PREFIX)
+              .setMetricEntities(VeniceController.CONTROLLER_SERVICE_METRIC_ENTITIES)
+              .extractAndSetOtelConfigs(propertiesList.get(0).getAsMap())
+              .setOtelAdditionalMetricsReader(inMemoryMetricReader)
+              .build());
 
       Optional<ClientConfig> consumerClientConfig = Optional.empty();
       Object clientConfig = options.getExtraProperties().get(VeniceServerWrapper.CLIENT_CONFIG_FOR_CONSUMER);

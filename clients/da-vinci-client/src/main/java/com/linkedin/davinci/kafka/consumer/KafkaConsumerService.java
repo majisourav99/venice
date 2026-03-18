@@ -88,6 +88,7 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
   private RandomAccessDaemonThreadFactory threadFactory;
   private final Logger LOGGER;
   private final ExecutorService consumerExecutor;
+  private final ExecutorService crossTpProcessingPool;
   private static final int SHUTDOWN_TIMEOUT_IN_SECOND = 1;
   // 4MB bitset size, 2 bitmaps for active and old bitset
   private static final RedundantExceptionFilter REDUNDANT_LOGGING_FILTER =
@@ -118,7 +119,8 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
       final ReadOnlyStoreRepository metadataRepository,
       final boolean isUnregisterMetricForDeletedStoreEnabled,
       final VeniceServerConfig serverConfig,
-      final PubSubContext pubSubContext) {
+      final PubSubContext pubSubContext,
+      final ExecutorService crossTpProcessingPool) {
     this.kafkaUrl = consumerProperties.getProperty(KAFKA_BOOTSTRAP_SERVERS);
     this.kafkaUrlForLogger = Utils.getSanitizedStringForLogger(kafkaUrl);
     this.LOGGER = LogManager.getLogger(
@@ -130,6 +132,9 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
     String consumerNamePrefix = "venice-shared-consumer-for-" + kafkaUrl + '-' + poolType.getStatSuffix();
     threadFactory = new RandomAccessDaemonThreadFactory(consumerNamePrefix, serverConfig.getLogContext());
     consumerExecutor = Executors.newFixedThreadPool(numOfConsumersPerKafkaCluster, threadFactory);
+
+    // Use the shared cross-TP processing pool passed from AggKafkaConsumerService
+    this.crossTpProcessingPool = crossTpProcessingPool;
     this.consumerToConsumptionTask = new IndexedHashMap<>(numOfConsumersPerKafkaCluster);
     this.aggStats = statsOverride != null
         ? statsOverride
@@ -138,7 +143,8 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
             kafkaClusterAlias,
             this::getMaxElapsedTimeMSSinceLastPollInConsumerPool,
             metadataRepository,
-            isUnregisterMetricForDeletedStoreEnabled);
+            isUnregisterMetricForDeletedStoreEnabled,
+            serverConfig.getClusterName());
 
     VeniceProperties properties = new VeniceProperties(consumerProperties);
     PubSubConsumerAdapterContext.Builder contextBuilder =
@@ -159,7 +165,9 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
           pubSubConsumerAdapterFactory.create(contextBuilder.build()),
           aggStats,
           this::recordPartitionsPerConsumerSensor,
-          this::handleUnsubscription);
+          this::handleUnsubscription,
+          serverConfig.getRegionName(),
+          i);
 
       Supplier<Map<PubSubTopicPartition, List<DefaultPubSubMessage>>> pollFunction =
           liveConfigBasedKafkaThrottlingEnabled
@@ -189,7 +197,8 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
           recordsThrottlerFunction,
           this.aggStats,
           cleaner,
-          consumerPollTracker);
+          consumerPollTracker,
+          crossTpProcessingPool);
       consumerToConsumptionTask.putByIndex(pubSubConsumer, consumptionTask, i);
       consumerToLocks.put(pubSubConsumer, new ReentrantLock());
     }
@@ -198,7 +207,8 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
       this.inactiveTopicPartitionChecker = new InactiveTopicPartitionChecker(
           getConsumerToConsumptionTask(),
           serverConfig.getInactiveTopicPartitionCheckerInternalInSeconds(),
-          serverConfig.getInactiveTopicPartitionCheckerThresholdInSeconds());
+          serverConfig.getInactiveTopicPartitionCheckerThresholdInSeconds(),
+          serverConfig.getLogContext());
       LOGGER.info("Created InactiveTopicPartitionChecker for consumer pool type: {}", poolType);
     } else {
       this.inactiveTopicPartitionChecker = null;
@@ -377,6 +387,7 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
     beginningTime = System.currentTimeMillis();
     consumerToConsumptionTask.keySet().forEach(SharedKafkaConsumer::close);
     LOGGER.info("SharedKafkaConsumer closed in {} ms.", System.currentTimeMillis() - beginningTime);
+    // Note: crossTpProcessingPool shutdown is handled by AggKafkaConsumerService
   }
 
   @Override
@@ -394,14 +405,16 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
       String kafkaClusterAlias,
       LongSupplier getMaxElapsedTimeSinceLastPollInConsumerPool,
       ReadOnlyStoreRepository metadataRepository,
-      boolean isUnregisterMetricForDeletedStoreEnabled) {
+      boolean isUnregisterMetricForDeletedStoreEnabled,
+      String veniceClusterName) {
     String nameWithKafkaClusterAlias = "kafka_consumer_service_for_" + kafkaClusterAlias;
     return new AggKafkaConsumerServiceStats(
         nameWithKafkaClusterAlias,
         metricsRepository,
         metadataRepository,
         getMaxElapsedTimeSinceLastPollInConsumerPool,
-        isUnregisterMetricForDeletedStoreEnabled);
+        isUnregisterMetricForDeletedStoreEnabled,
+        veniceClusterName);
   }
 
   @Override
@@ -527,7 +540,8 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
         ReadOnlyStoreRepository metadataRepository,
         boolean unregisterMetricForDeletedStoreEnabled,
         VeniceServerConfig serverConfig,
-        PubSubContext pubSubContext);
+        PubSubContext pubSubContext,
+        ExecutorService crossTpProcessingPool);
   }
 
   /**
@@ -545,6 +559,8 @@ public abstract class KafkaConsumerService extends AbstractKafkaConsumerService 
       totalPartitions += subscribedPartitionCount;
       minPartitionsPerConsumer = Math.min(minPartitionsPerConsumer, subscribedPartitionCount);
       maxPartitionsPerConsumer = Math.max(maxPartitionsPerConsumer, subscribedPartitionCount);
+      // Record raw per-consumer partition count to OTel histogram (asymmetric: Tehuti uses pre-computed gauges)
+      aggStats.recordTotalPartitionAssignmentForOtel(subscribedPartitionCount);
     }
     int avgPartitionsPerConsumer = totalPartitions / consumerToConsumptionTask.size();
 

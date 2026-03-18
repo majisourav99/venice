@@ -393,4 +393,5 @@ public class HelixGroupStatsTest {
         RoutingMetricEntity.HELIX_GROUP_CALL_TIME.getMetricEntity().getMetricName(),
         otelMetricPrefix);
   }
+
 }

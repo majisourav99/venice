@@ -1,5 +1,6 @@
 package com.linkedin.venice.listener;
 
+import com.linkedin.alpini.base.ssl.SslFactory;
 import com.linkedin.alpini.netty4.handlers.BasicHttpServerCodec;
 import com.linkedin.alpini.netty4.http2.Http2PipelineInitializer;
 import com.linkedin.alpini.netty4.ssl.SslInitializer;
@@ -55,6 +56,7 @@ public class HttpChannelInitializer extends ChannelInitializer<SocketChannel> {
   private final AggServerHttpRequestStats computeStats;
   private final ThreadPoolStats sslHandshakesThreadPoolStats;
   private final Optional<SSLFactory> sslFactory;
+  private final SslFactory alpiniSslFactory;
   private final ThreadPoolExecutor sslHandshakeExecutor;
   private final Optional<ServerAclHandler> aclHandler;
   private final Optional<ServerStoreAclHandler> storeAclHandler;
@@ -86,6 +88,7 @@ public class HttpChannelInitializer extends ChannelInitializer<SocketChannel> {
 
     boolean isKeyValueProfilingEnabled = serverConfig.isKeyValueProfilingEnabled();
     boolean isUnregisterMetricForDeletedStoreEnabled = serverConfig.isUnregisterMetricForDeletedStoreEnabled();
+    boolean readOtelStatsEnabled = serverConfig.isReadOtelStatsEnabled();
 
     this.singleGetStats = new AggServerHttpRequestStats(
         serverConfig.getClusterName(),
@@ -94,7 +97,8 @@ public class HttpChannelInitializer extends ChannelInitializer<SocketChannel> {
         isKeyValueProfilingEnabled,
         storeMetadataRepository,
         isUnregisterMetricForDeletedStoreEnabled,
-        isDaVinciClient);
+        isDaVinciClient,
+        readOtelStatsEnabled);
     this.multiGetStats = new AggServerHttpRequestStats(
         serverConfig.getClusterName(),
         metricsRepository,
@@ -102,7 +106,8 @@ public class HttpChannelInitializer extends ChannelInitializer<SocketChannel> {
         isKeyValueProfilingEnabled,
         storeMetadataRepository,
         isUnregisterMetricForDeletedStoreEnabled,
-        isDaVinciClient);
+        isDaVinciClient,
+        readOtelStatsEnabled);
     this.computeStats = new AggServerHttpRequestStats(
         serverConfig.getClusterName(),
         metricsRepository,
@@ -110,13 +115,15 @@ public class HttpChannelInitializer extends ChannelInitializer<SocketChannel> {
         isKeyValueProfilingEnabled,
         storeMetadataRepository,
         isUnregisterMetricForDeletedStoreEnabled,
-        isDaVinciClient);
+        isDaVinciClient,
+        readOtelStatsEnabled);
 
     if (serverConfig.isComputeFastAvroEnabled()) {
       LOGGER.info("Fast avro for compute is enabled");
     }
 
     this.sslFactory = sslFactory;
+    this.alpiniSslFactory = sslFactory.isPresent() ? SslUtils.toAlpiniSSLFactory(sslFactory.get()) : null;
     this.sslHandshakeExecutor = sslHandshakeExecutor;
     this.sslHandshakesThreadPoolStats = sslHandshakeExecutor != null
         ? new ThreadPoolStats(metricsRepository, sslHandshakeExecutor, "ssl_handshake_thread_pool")
@@ -169,7 +176,8 @@ public class HttpChannelInitializer extends ChannelInitializer<SocketChannel> {
       this.serverConnectionStatsHandler = new ServerConnectionStatsHandler(
           this.identityParser,
           new ServerConnectionStats(metricsRepository, "server_connection_stats"),
-          serverConfig.getRouterPrincipalName());
+          serverConfig.getRouterPrincipalName(),
+          serverConfig.getLogContext());
     } else {
       this.serverConnectionStatsHandler = null;
     }
@@ -197,10 +205,12 @@ public class HttpChannelInitializer extends ChannelInitializer<SocketChannel> {
   @Override
   public void initChannel(SocketChannel ch) {
     if (sslFactory.isPresent()) {
-      SslInitializer sslInitializer = new SslInitializer(SslUtils.toAlpiniSSLFactory(sslFactory.get()), false);
+      ch.attr(ServerConnectionStatsHandler.CHANNEL_INIT_START_TS).set(System.nanoTime());
+      SslInitializer sslInitializer = new SslInitializer(alpiniSslFactory, false);
       if (sslHandshakeExecutor != null) {
-        sslInitializer
-            .enableSslTaskExecutor(sslHandshakeExecutor, sslHandshakesThreadPoolStats::recordQueuedTasksCount);
+        sslInitializer.enableSslTaskExecutor(
+            sslHandshakeExecutor,
+            ignored -> sslHandshakesThreadPoolStats.recordQueuedTasksCount());
       }
       sslInitializer.setIdentityParser(identityParser::parseIdentityFromCert);
       ch.pipeline().addLast(sslInitializer);

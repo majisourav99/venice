@@ -236,4 +236,5 @@ public class BasicConsumerStatsTest {
 
     return builder.build();
   }
+
 }

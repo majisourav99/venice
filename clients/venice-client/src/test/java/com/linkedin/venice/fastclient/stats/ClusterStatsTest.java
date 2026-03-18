@@ -194,4 +194,5 @@ public class ClusterStatsTest {
         STORE_VERSION_CURRENT.getMetricEntity().getMetricName(),
         FAST_CLIENT.getMetricsPrefix());
   }
+
 }

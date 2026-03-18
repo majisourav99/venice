@@ -12,6 +12,7 @@ import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_PLA
 import static com.linkedin.venice.ConfigKeys.CLUSTER_NAME;
 import static com.linkedin.venice.ConfigKeys.INGESTION_USE_DA_VINCI_CLIENT;
 import static com.linkedin.venice.ConfigKeys.KAFKA_BOOTSTRAP_SERVERS;
+import static com.linkedin.venice.ConfigKeys.VENICE_LOG_CONTEXT_COMPONENT;
 import static com.linkedin.venice.ConfigKeys.ZOOKEEPER_ADDRESS;
 import static com.linkedin.venice.client.store.ClientFactory.getTransportClient;
 import static org.apache.avro.Schema.Type.RECORD;
@@ -26,6 +27,7 @@ import com.linkedin.davinci.storage.chunking.GenericChunkingAdapter;
 import com.linkedin.davinci.storage.chunking.GenericRecordChunkingAdapter;
 import com.linkedin.davinci.store.cache.backend.ObjectCacheBackend;
 import com.linkedin.davinci.store.cache.backend.ObjectCacheConfig;
+import com.linkedin.venice.acl.VeniceComponent;
 import com.linkedin.venice.annotation.VisibleForTesting;
 import com.linkedin.venice.client.exceptions.ServiceDiscoveryException;
 import com.linkedin.venice.client.exceptions.VeniceClientException;
@@ -49,6 +51,7 @@ import com.linkedin.venice.exceptions.VeniceUnsupportedOperationException;
 import com.linkedin.venice.meta.Store;
 import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.pubsub.api.PubSubPosition;
+import com.linkedin.venice.pubsub.api.PubSubSymbolicPosition;
 import com.linkedin.venice.schema.SchemaReader;
 import com.linkedin.venice.schema.SchemaRepoBackedSchemaReader;
 import com.linkedin.venice.serialization.AvroStoreDeserializerCache;
@@ -70,6 +73,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -117,6 +121,7 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
    * 1. Split the big request into smaller chunks.
    * 2. Execute these chunks concurrently.
    */
+  // TODO: Pass LogContext to DaemonThreadFactory once static singleton has access to instance context
   public static final ExecutorService READ_CHUNK_EXECUTOR = Executors.newFixedThreadPool(
       Runtime.getRuntime().availableProcessors(),
       new DaemonThreadFactory("DaVinci_Read_Chunk_Executor"));
@@ -277,27 +282,33 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
   }
 
   protected CompletableFuture<Void> seekToTail() {
-    if (getBackend().isIsolatedIngestion()) {
-      throw new VeniceClientException("Isolated Ingestion is not supported with seekToCheckpoint");
-    }
     throwIfNotReady();
-    addPartitionsToSubscription(ComplementSet.universalSet());
-    return getStoreBackend().seekToCheckpoint(new DaVinciSeekCheckpointInfo(null, null, null, true), getVersion());
+    Set<Integer> allPartitions = new HashSet<>();
+    for (int i = 0; i < getPartitionCount(); i++) {
+      allPartitions.add(i);
+    }
+    return seekToTail(allPartitions);
   }
 
   protected CompletableFuture<Void> seekToTail(Set<Integer> partitionSet) {
-    if (getBackend().isIsolatedIngestion()) {
-      throw new VeniceClientException("Isolated Ingestion is not supported with seekToCheckpoint");
-    }
+    return seekToPosition(partitionSet, PubSubSymbolicPosition.LATEST);
+  }
+
+  protected CompletableFuture<Void> seekToBeginningOfPush(Set<Integer> partitionSet) {
+    return seekToPosition(partitionSet, PubSubSymbolicPosition.EARLIEST);
+  }
+
+  private CompletableFuture<Void> seekToPosition(Set<Integer> partitionSet, PubSubPosition position) {
     throwIfNotReady();
     addPartitionsToSubscription(ComplementSet.wrap(partitionSet));
-    return getStoreBackend().seekToCheckpoint(new DaVinciSeekCheckpointInfo(null, null, null, true), getVersion());
+    Map<Integer, PubSubPosition> positionMap = new HashMap<>();
+    for (int partition: partitionSet) {
+      positionMap.put(partition, position);
+    }
+    return getStoreBackend().seekToCheckpoint(DaVinciSeekCheckpointInfo.forPositions(positionMap), getVersion());
   }
 
   protected CompletableFuture<Void> seekToCheckpoint(Set<VeniceChangeCoordinate> checkpoints) {
-    if (getBackend().isIsolatedIngestion()) {
-      throw new VeniceClientException("Isolated Ingestion is not supported with seekToCheckpoint");
-    }
     throwIfNotReady();
     Map<Integer, PubSubPosition> positionMap = new HashMap<>();
     for (VeniceChangeCoordinate changeCoordinate: checkpoints) {
@@ -308,28 +319,22 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
       positionMap.put(changeCoordinate.getPartition(), changeCoordinate.getPosition());
     }
     addPartitionsToSubscription(ComplementSet.wrap(positionMap.keySet()));
-    return getStoreBackend()
-        .seekToCheckpoint(new DaVinciSeekCheckpointInfo(positionMap, null, null, false), getVersion());
+    return getStoreBackend().seekToCheckpoint(DaVinciSeekCheckpointInfo.forPositions(positionMap), getVersion());
   }
 
   protected CompletableFuture<Void> seekToTimestamps(Map<Integer, Long> timestamps) {
-    if (getBackend().isIsolatedIngestion()) {
-      throw new VeniceClientException("Isolated Ingestion is not supported with seekToTimestamps");
-    }
     throwIfNotReady();
     addPartitionsToSubscription(ComplementSet.wrap(timestamps.keySet()));
-    return getStoreBackend()
-        .seekToCheckpoint(new DaVinciSeekCheckpointInfo(null, timestamps, null, false), getVersion());
+    return getStoreBackend().seekToCheckpoint(DaVinciSeekCheckpointInfo.forTimestamps(timestamps), getVersion());
   }
 
   protected CompletableFuture<Void> seekToTimestamps(Long timestamp) {
-    if (getBackend().isIsolatedIngestion()) {
-      throw new VeniceClientException("Isolated Ingestion is not supported with seekToTimestamps");
-    }
     throwIfNotReady();
-    addPartitionsToSubscription(ComplementSet.universalSet());
-    return getStoreBackend()
-        .seekToCheckpoint(new DaVinciSeekCheckpointInfo(null, null, timestamp, false), getVersion());
+    Map<Integer, Long> timestamps = new HashMap<>();
+    for (int i = 0; i < getPartitionCount(); i++) {
+      timestamps.put(i, timestamp);
+    }
+    return seekToTimestamps(timestamps);
   }
 
   protected CompletableFuture<Void> subscribe(ComplementSet<Integer> partitions) {
@@ -835,7 +840,8 @@ public class AvroGenericDaVinciClient<K, V> implements DaVinciClient<K, V>, Avro
         .put(ROCKSDB_PLAIN_TABLE_FORMAT_ENABLED, daVinciConfig.getStorageClass() == StorageClass.MEMORY_BACKED_BY_DISK)
         .put(INGESTION_USE_DA_VINCI_CLIENT, true)
         .put(RECORD_TRANSFORMER_VALUE_SCHEMA, recordTransformerOutputValueSchema)
-        // Explicitly disable memory limiter in Isolated Process
+        .put(VENICE_LOG_CONTEXT_COMPONENT, VeniceComponent.DAVINCI_CLIENT.name())
+        // backendConfig.toProperties() is put last so that callers (e.g., CDC consumers) can override defaults
         .put(backendConfig.toProperties())
         .build();
     logger.info("backendConfig=" + config.toString(true));

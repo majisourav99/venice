@@ -1,5 +1,6 @@
 package com.linkedin.davinci;
 
+import static com.linkedin.venice.utils.TestUtils.waitForNonDeterministicAssertion;
 import static org.mockito.AdditionalAnswers.answerVoid;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anySet;
@@ -45,7 +46,9 @@ import com.linkedin.venice.utils.TestUtils;
 import com.linkedin.venice.utils.Utils;
 import com.linkedin.venice.utils.VeniceProperties;
 import io.tehuti.Metric;
+import io.tehuti.metrics.MetricConfig;
 import io.tehuti.metrics.MetricsRepository;
+import io.tehuti.metrics.stats.AsyncGauge;
 import java.io.File;
 import java.time.Duration;
 import java.util.Collections;
@@ -69,6 +72,7 @@ public class StoreBackendTest {
   DaVinciBackend backend;
   StoreBackend storeBackend;
   Map<String, VersionBackend> versionMap;
+  AsyncGauge.AsyncGaugeExecutor gaugeExecutor;
   MetricsRepository metricsRepository;
   StorageService storageService;
   IngestionBackend ingestionBackend;
@@ -89,7 +93,9 @@ public class StoreBackendTest {
     doAnswer(answerVoid(Runnable::run)).when(executor).execute(any());
 
     versionMap = new HashMap<>();
-    metricsRepository = new MetricsRepository();
+    // Use a dedicated executor to avoid contention with the shared DEFAULT_ASYNC_GAUGE_EXECUTOR in CI
+    gaugeExecutor = new AsyncGauge.AsyncGaugeExecutor.Builder().build();
+    metricsRepository = new MetricsRepository(new MetricConfig(gaugeExecutor));
     storageService = mock(StorageService.class);
     ingestionBackend = mock(IngestionBackend.class);
     compressorFactory = mock(StorageEngineBackedCompressorFactory.class);
@@ -130,6 +136,12 @@ public class StoreBackendTest {
     when(backend.getStoreOrThrow(store.getName())).thenReturn(storeBackend);
   }
 
+  @org.testng.annotations.AfterMethod
+  void tearDown() throws Exception {
+    metricsRepository.close();
+    gaugeExecutor.close();
+  }
+
   private double getMetric(String metricName) {
     Metric metric = metricsRepository.getMetric("." + store.getName() + "--" + metricName);
     assertNotNull(metric, "Expected metric " + metricName + " not found.");
@@ -154,8 +166,11 @@ public class StoreBackendTest {
 
     // Expecting to subscribe to version1 and that version2 is a future version.
     CompletableFuture subscribeResult = storeBackend.subscribe(ComplementSet.of(partition));
-    verify(heartbeatMonitoringService, times(1))
-        .updateLagMonitor(version1.kafkaTopicName(), partition, HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR);
+    verify(heartbeatMonitoringService, times(1)).updateLagMonitor(
+        eq(version1.kafkaTopicName()),
+        eq(partition),
+        eq(HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR),
+        anyString());
     TimeUnit.MILLISECONDS.sleep(v1SubscribeDurationMs);
     versionMap.get(version1.kafkaTopicName()).completePartition(partition);
     subscribeResult.get(3, TimeUnit.SECONDS);
@@ -163,13 +178,14 @@ public class StoreBackendTest {
     try (ReferenceCounted<VersionBackend> versionRef = storeBackend.getDaVinciCurrentVersion()) {
       assertEquals(versionRef.get().getVersion().getNumber(), version1.getNumber());
     }
-    // Verify that all partition future for version 1 are completed successfully.
-    assertTrue(versionMap.get(version1.kafkaTopicName()).areAllPartitionFuturesCompletedSuccessfully());
-
-    assertEquals(getMetric("current_version_number.Gauge"), (double) version1.getNumber());
-    assertEquals(getMetric("future_version_number.Gauge"), (double) version2.getNumber());
-    assertTrue(Math.abs(getMetric("data_age_ms.Gauge") - version1.getAge().toMillis()) < 1000);
-    assertTrue(Math.abs(getMetric("subscribe_duration_ms.Avg") - v1SubscribeDurationMs) < 50);
+    // Partition futures and metrics may be completed asynchronously in callback threads.
+    waitForNonDeterministicAssertion(5, TimeUnit.SECONDS, () -> {
+      assertTrue(versionMap.get(version1.kafkaTopicName()).areAllPartitionFuturesCompletedSuccessfully());
+      assertEquals(getMetric("current_version_number.Gauge"), (double) version1.getNumber());
+      assertEquals(getMetric("future_version_number.Gauge"), (double) version2.getNumber());
+      assertTrue(Math.abs(getMetric("data_age_ms.Gauge") - version1.getAge().toMillis()) < 1000);
+      assertTrue(Math.abs(getMetric("subscribe_duration_ms.Avg") - v1SubscribeDurationMs) < 50);
+    });
 
     // Simulate future version ingestion is complete.
     TimeUnit.MILLISECONDS.sleep(v2SubscribeDurationMs - v1SubscribeDurationMs);
@@ -188,11 +204,14 @@ public class StoreBackendTest {
       assertEquals(versionRef.get().getVersion().getNumber(), version2.getNumber());
     }
 
-    assertEquals(getMetric("current_version_number.Gauge"), (double) version2.getNumber());
-    assertTrue(Math.abs(getMetric("data_age_ms.Gauge") - version2.getAge().toMillis()) < 1000);
-    assertTrue(
-        Math.abs(getMetric("subscribe_duration_ms.Avg") - (v1SubscribeDurationMs + v2SubscribeDurationMs) / 2.) < 50);
-    assertTrue(Math.abs(getMetric("subscribe_duration_ms.Max") - v2SubscribeDurationMs) < 50);
+    // Version swap and metric recording happen asynchronously after handleStoreChanged.
+    waitForNonDeterministicAssertion(5, TimeUnit.SECONDS, () -> {
+      assertEquals(getMetric("current_version_number.Gauge"), (double) version2.getNumber());
+      assertTrue(Math.abs(getMetric("data_age_ms.Gauge") - version2.getAge().toMillis()) < 1000);
+      assertTrue(
+          Math.abs(getMetric("subscribe_duration_ms.Avg") - (v1SubscribeDurationMs + v2SubscribeDurationMs) / 2.) < 50);
+      assertTrue(Math.abs(getMetric("subscribe_duration_ms.Max") - v2SubscribeDurationMs) < 50);
+    });
   }
 
   @Test
@@ -366,17 +385,29 @@ public class StoreBackendTest {
   void testSubscribeUnsubscribe() throws Exception {
     // Simulate concurrent unsubscribe while subscribe is pending.
     CompletableFuture subscribeResult = storeBackend.subscribe(ComplementSet.of(0, 1));
-    verify(heartbeatMonitoringService, times(1))
-        .updateLagMonitor(version1.kafkaTopicName(), 0, HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR);
-    verify(heartbeatMonitoringService, times(1))
-        .updateLagMonitor(version1.kafkaTopicName(), 1, HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR);
+    verify(heartbeatMonitoringService, times(1)).updateLagMonitor(
+        eq(version1.kafkaTopicName()),
+        eq(0),
+        eq(HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR),
+        anyString());
+    verify(heartbeatMonitoringService, times(1)).updateLagMonitor(
+        eq(version1.kafkaTopicName()),
+        eq(1),
+        eq(HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR),
+        anyString());
     versionMap.get(version1.kafkaTopicName()).completePartition(0);
     assertFalse(subscribeResult.isDone());
     storeBackend.unsubscribe(ComplementSet.of(1));
-    verify(heartbeatMonitoringService, times(1))
-        .updateLagMonitor(version1.kafkaTopicName(), 1, HeartbeatLagMonitorAction.REMOVE_MONITOR);
-    verify(heartbeatMonitoringService, times(0))
-        .updateLagMonitor(version1.kafkaTopicName(), 0, HeartbeatLagMonitorAction.REMOVE_MONITOR);
+    verify(heartbeatMonitoringService, times(1)).updateLagMonitor(
+        eq(version1.kafkaTopicName()),
+        eq(1),
+        eq(HeartbeatLagMonitorAction.REMOVE_MONITOR),
+        anyString());
+    verify(heartbeatMonitoringService, times(0)).updateLagMonitor(
+        eq(version1.kafkaTopicName()),
+        eq(0),
+        eq(HeartbeatLagMonitorAction.REMOVE_MONITOR),
+        anyString());
     // Verify that unsubscribe completed pending subscribe without failing it.
     subscribeResult.get(3, TimeUnit.SECONDS);
     TestUtils.waitForNonDeterministicAssertion(3, TimeUnit.SECONDS, () -> {

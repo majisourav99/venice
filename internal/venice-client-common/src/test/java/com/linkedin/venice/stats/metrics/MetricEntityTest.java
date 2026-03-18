@@ -2,7 +2,7 @@ package com.linkedin.venice.stats.metrics;
 
 import static com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions.VENICE_CLUSTER_NAME;
 import static com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions.VENICE_STORE_NAME;
-import static com.linkedin.venice.stats.metrics.MetricEntity.createInternalMetricEntityWithoutDimensions;
+import static com.linkedin.venice.stats.metrics.MetricEntity.createWithNoDimensions;
 
 import com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions;
 import java.util.Collections;
@@ -55,12 +55,25 @@ public class MetricEntityTest {
   }
 
   @Test
-  public void testCreateInternalMetricEntityWithoutDimensions() {
-    MetricEntity metricEntity = createInternalMetricEntityWithoutDimensions(
+  public void testCreateWithNoDimensions() {
+    MetricEntity metricEntity =
+        createWithNoDimensions("testMetric", MetricType.GAUGE, MetricUnit.NUMBER, "test no dimensions");
+
+    Assert.assertEquals(metricEntity.getMetricName(), "testMetric", "Metric name should match");
+    Assert.assertEquals(metricEntity.getMetricType(), MetricType.GAUGE, "Metric type should match");
+    Assert.assertEquals(metricEntity.getUnit(), MetricUnit.NUMBER, "Metric unit should match");
+    Assert.assertEquals(metricEntity.getDescription(), "test no dimensions", "Description should match");
+    Assert.assertEquals(metricEntity.getDimensionsList(), Collections.EMPTY_SET, "Dimensions list should be empty");
+    Assert.assertNull(metricEntity.getCustomMetricPrefix(), "Custom metric prefix should be null");
+  }
+
+  @Test
+  public void testCreateWithNoDimensionsAndCustomPrefix() {
+    MetricEntity metricEntity = createWithNoDimensions(
         "testMetric",
         MetricType.COUNTER,
         MetricUnit.MILLISECOND,
-        "test createInternalMetricEntityWithoutDimensions",
+        "test createWithNoDimensions custom prefix",
         "test");
 
     Assert.assertEquals(metricEntity.getMetricName(), "testMetric", "Metric name should match");
@@ -68,20 +81,53 @@ public class MetricEntityTest {
     Assert.assertEquals(metricEntity.getUnit(), MetricUnit.MILLISECOND, "Metric unit should match");
     Assert.assertEquals(
         metricEntity.getDescription(),
-        "test createInternalMetricEntityWithoutDimensions",
+        "test createWithNoDimensions custom prefix",
         "Description should match");
     Assert.assertEquals(metricEntity.getDimensionsList(), Collections.EMPTY_SET, "Dimensions list should be empty");
     Assert.assertEquals(metricEntity.getCustomMetricPrefix(), "test", "Custom metric prefix should match");
 
     try {
-      createInternalMetricEntityWithoutDimensions(
+      createWithNoDimensions(
           "testMetric",
           MetricType.COUNTER,
           MetricUnit.MILLISECOND,
-          "test createInternalMetricEntityWithoutDimensions",
+          "test createWithNoDimensions custom prefix",
           "venice.test");
     } catch (IllegalArgumentException e) {
       Assert.assertTrue(e.getMessage().startsWith("Custom prefix should not start with venice"), e.getMessage());
     }
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "MetricUnit.RATIO requires a double-capable metric type.*")
+  public void testRatioUnitRejectsLongOnlyMetricType() {
+    Set<VeniceMetricsDimensions> dimensions = new HashSet<>();
+    dimensions.add(VENICE_STORE_NAME);
+    // ASYNC_GAUGE is long-only — should reject RATIO unit
+    new MetricEntity("test.ratio", MetricType.ASYNC_GAUGE, MetricUnit.RATIO, "test ratio validation", dimensions);
+  }
+
+  @Test
+  public void testRatioUnitAcceptsDoubleCapableMetricTypes() {
+    Set<VeniceMetricsDimensions> dimensions = new HashSet<>();
+    dimensions.add(VENICE_STORE_NAME);
+    // These should all succeed — they support double values
+    new MetricEntity(
+        "test.ratio.double_gauge",
+        MetricType.ASYNC_DOUBLE_GAUGE,
+        MetricUnit.RATIO,
+        "ratio with double gauge",
+        dimensions);
+    new MetricEntity(
+        "test.ratio.histogram",
+        MetricType.HISTOGRAM,
+        MetricUnit.RATIO,
+        "ratio with histogram",
+        dimensions);
+    new MetricEntity(
+        "test.ratio.min_max",
+        MetricType.MIN_MAX_COUNT_SUM_AGGREGATIONS,
+        MetricUnit.RATIO,
+        "ratio with min max",
+        dimensions);
   }
 }

@@ -10,6 +10,8 @@ import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.service.AbstractVeniceService;
 import com.linkedin.venice.stats.BackupVersionOptimizationServiceStats;
 import com.linkedin.venice.utils.DaemonThreadFactory;
+import com.linkedin.venice.utils.LogContext;
+import com.linkedin.venice.utils.Utils;
 import com.linkedin.venice.utils.concurrent.VeniceConcurrentHashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -79,8 +81,7 @@ public class BackupVersionOptimizationService extends AbstractVeniceService impl
 
   private final Map<String, ResourceState> resourceStateMap = new VeniceConcurrentHashMap<>();
 
-  private final ScheduledExecutorService executor =
-      Executors.newSingleThreadScheduledExecutor(new DaemonThreadFactory("BackupVersionCleanupService"));
+  private final ScheduledExecutorService executor;
 
   private boolean stop = false;
 
@@ -97,12 +98,15 @@ public class BackupVersionOptimizationService extends AbstractVeniceService impl
       StorageEngineRepository storageEngineRepository,
       long noReadThresholdMSForDatabaseOptimization,
       long scheduleIntervalSeconds,
-      BackupVersionOptimizationServiceStats stats) {
+      BackupVersionOptimizationServiceStats stats,
+      LogContext logContext) {
     this.storeRepository = storeRepository;
     this.storageEngineRepository = storageEngineRepository;
     this.noReadThresholdMSForDatabaseOptimization = noReadThresholdMSForDatabaseOptimization;
     this.scheduleIntervalSeconds = scheduleIntervalSeconds;
     this.stats = stats;
+    this.executor =
+        Executors.newSingleThreadScheduledExecutor(new DaemonThreadFactory("BackupVersionCleanupService", logContext));
   }
 
   private Runnable getOptimizationRunnable() {
@@ -153,7 +157,10 @@ public class BackupVersionOptimizationService extends AbstractVeniceService impl
               engine.reopenStoragePartition(partitionId);
               stats.recordBackupVersionDatabaseOptimization();
             } catch (Exception e) {
-              LOGGER.error("Failed to optimize database for resource: {}, partition: {}", resourceName, partitionId, e);
+              LOGGER.error(
+                  "Failed to optimize database for topic-partition: {}",
+                  Utils.getReplicaId(resourceName, partitionId),
+                  e);
               errored = true;
             }
           }

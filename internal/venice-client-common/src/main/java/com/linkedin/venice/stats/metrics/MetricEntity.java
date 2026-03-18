@@ -46,10 +46,7 @@ public class MetricEntity {
       @Nonnull MetricUnit unit,
       @Nonnull String description,
       @Nonnull Set<VeniceMetricsDimensions> dimensionsList) {
-    Validate.notEmpty(metricName, "Metric name cannot be empty");
-    Validate.notNull(metricType, "Metric type cannot be null");
-    Validate.notNull(unit, "Metric unit cannot be null");
-    Validate.notEmpty(description, "Metric description cannot be empty");
+    validateCommonFields(metricName, metricType, unit, description);
     Validate.notEmpty(dimensionsList, "Dimensions list cannot be empty");
     this.metricName = metricName;
     this.metricType = metricType;
@@ -89,38 +86,66 @@ public class MetricEntity {
   }
 
   /**
-   * private: only from {@link #createInternalMetricEntityWithoutDimensions to use for internal metrics
-   * like {@link com.linkedin.venice.stats.VeniceOpenTelemetryMetricsRepository.CommonMetricsEntity}
-   * that do not require dimensions.
+   * Factory method for metrics without dimensions. These metrics should only be used
+   * with {@link MetricEntityStateBase}.
    */
+  public static MetricEntity createWithNoDimensions(
+      @Nonnull String metricName,
+      @Nonnull MetricType metricType,
+      @Nonnull MetricUnit unit,
+      @Nonnull String description) {
+    return new MetricEntity(metricName, metricType, unit, description, (String) null);
+  }
+
+  /**
+   * Factory method for metrics without dimensions that need a custom metric prefix,
+   * e.g. {@link com.linkedin.venice.stats.VeniceOpenTelemetryMetricsRepository.CommonMetricsEntity}.
+   * These metrics should only be used with {@link MetricEntityStateBase}.
+   */
+  public static MetricEntity createWithNoDimensions(
+      @Nonnull String metricName,
+      @Nonnull MetricType metricType,
+      @Nonnull MetricUnit unit,
+      @Nonnull String description,
+      @Nonnull String customMetricPrefix) {
+    Validate.notEmpty(customMetricPrefix, "Custom metric prefix cannot be empty");
+    if (customMetricPrefix.startsWith("venice.")) {
+      // venice will be added automatically
+      throw new IllegalArgumentException("Custom prefix should not start with venice: " + customMetricPrefix);
+    }
+    return new MetricEntity(metricName, metricType, unit, description, customMetricPrefix);
+  }
+
+  /** Private constructor for {@link #createWithNoDimensions} factory methods */
   private MetricEntity(
       @Nonnull String metricName,
       @Nonnull MetricType metricType,
       @Nonnull MetricUnit unit,
       @Nonnull String description,
       String customMetricPrefix) {
-    Validate.notEmpty(metricName, "Metric name cannot be empty");
-    Validate.notNull(metricType, "Metric type cannot be null");
-    Validate.notNull(unit, "Metric unit cannot be null");
-    Validate.notEmpty(description, "Metric description cannot be empty");
+    validateCommonFields(metricName, metricType, unit, description);
     this.metricName = metricName;
     this.metricType = metricType;
     this.unit = unit;
     this.description = description;
-    this.dimensionsList = Collections.EMPTY_SET;
+    this.dimensionsList = Collections.emptySet();
     this.customMetricPrefix = customMetricPrefix;
-    if (customMetricPrefix != null && customMetricPrefix.startsWith("venice.")) {
-      // venice will be added automatically
-      throw new IllegalArgumentException("Custom prefix should not start with venice: " + customMetricPrefix);
-    }
   }
 
-  public static MetricEntity createInternalMetricEntityWithoutDimensions(
-      @Nonnull String metricName,
-      @Nonnull MetricType metricType,
-      @Nonnull MetricUnit unit,
-      @Nonnull String description,
-      String customMetricPrefix) {
-    return new MetricEntity(metricName, metricType, unit, description, customMetricPrefix);
+  /** Validates fields common to all constructors, including the RATIO/double-type constraint. */
+  private static void validateCommonFields(
+      String metricName,
+      MetricType metricType,
+      MetricUnit unit,
+      String description) {
+    Validate.notEmpty(metricName, "Metric name cannot be empty");
+    Validate.notNull(metricType, "Metric type cannot be null");
+    Validate.notNull(unit, "Metric unit cannot be null");
+    Validate.notEmpty(description, "Metric description cannot be empty");
+    if (unit == MetricUnit.RATIO && !metricType.supportsDoubleValues()) {
+      throw new IllegalArgumentException(
+          "MetricUnit.RATIO requires a double-capable metric type (HISTOGRAM, MIN_MAX_COUNT_SUM_AGGREGATIONS, "
+              + "or ASYNC_DOUBLE_GAUGE), but got: " + metricType + " for metric: " + metricName);
+    }
   }
 }

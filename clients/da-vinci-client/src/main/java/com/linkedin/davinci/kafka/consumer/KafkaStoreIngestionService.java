@@ -84,6 +84,7 @@ import com.linkedin.venice.service.AbstractVeniceService;
 import com.linkedin.venice.service.ICProvider;
 import com.linkedin.venice.stats.ThreadPoolStats;
 import com.linkedin.venice.stats.VeniceMetricsRepository;
+import com.linkedin.venice.stats.dimensions.VeniceIngestionFailureReason;
 import com.linkedin.venice.system.store.ControllerClientBackedSystemSchemaInitializer;
 import com.linkedin.venice.system.store.MetaStoreWriter;
 import com.linkedin.venice.throttle.EventThrottler;
@@ -100,6 +101,7 @@ import com.linkedin.venice.utils.lazy.Lazy;
 import com.linkedin.venice.utils.locks.AutoCloseableLock;
 import com.linkedin.venice.utils.locks.ResourceAutoClosableLockManager;
 import com.linkedin.venice.utils.pools.LandFillObjectPool;
+import com.linkedin.venice.views.VeniceView;
 import com.linkedin.venice.writer.VeniceWriterFactory;
 import io.tehuti.metrics.MetricsRepository;
 import java.nio.ByteBuffer;
@@ -178,8 +180,6 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
 
   private final StoreIngestionTaskFactory ingestionTaskFactory;
 
-  private final boolean isIsolatedIngestion;
-
   private final boolean isDaVinciClient;
 
   private final TopicManagerRepository topicManagerRepository;
@@ -197,6 +197,7 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
   private final Map<String, InternalDaVinciRecordTransformerConfig> storeNameToInternalRecordTransformerConfig =
       new VeniceConcurrentHashMap<>();
   private AggVersionedDaVinciRecordTransformerStats recordTransformerStats = null;
+  private final Set<String> blobTransferDisabledStores = VeniceConcurrentHashMap.newKeySet();
 
   private final PubSubProducerAdapterFactory producerAdapterFactory;
 
@@ -241,7 +242,6 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
       InternalAvroSpecificSerializer<PartitionState> partitionStateSerializer,
       Optional<HelixReadOnlyZKSharedSchemaRepository> zkSharedSchemaRepository,
       ICProvider icProvider,
-      boolean isIsolatedIngestion,
       StorageEngineBackedCompressorFactory compressorFactory,
       Optional<ObjectCacheBackend> cacheBackend,
       boolean isDaVinciClient,
@@ -259,7 +259,6 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
     this.metadataRepo = metadataRepo;
     this.topicNameToIngestionTaskMap = new ConcurrentSkipListMap<>();
     this.veniceConfigLoader = veniceConfigLoader;
-    this.isIsolatedIngestion = isIsolatedIngestion;
     this.isDaVinciClient = isDaVinciClient;
     this.partitionStateSerializer = partitionStateSerializer;
     this.compressorFactory = compressorFactory;
@@ -422,7 +421,8 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
     AggVersionedDIVStats versionedDIVStats = new AggVersionedDIVStats(
         metricsRepository,
         metadataRepo,
-        serverConfig.isUnregisterMetricForDeletedStoreEnabled());
+        serverConfig.isUnregisterMetricForDeletedStoreEnabled(),
+        serverConfig.getClusterName());
     this.versionedIngestionStats = new AggVersionedIngestionStats(metricsRepository, metadataRepo, serverConfig);
     if (serverConfig.isDedicatedDrainerQueueEnabled()) {
       this.storeBufferService = new SeparatedStoreBufferService(serverConfig, metricsRepository);
@@ -630,8 +630,13 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
   private StoreIngestionTask createStoreIngestionTask(
       VeniceStoreVersionConfig veniceStoreVersionConfig,
       int partitionId) {
-    String storeName = Version.parseStoreFromKafkaTopicName(veniceStoreVersionConfig.getStoreVersionName());
-    int versionNumber = Version.parseVersionFromKafkaTopicName(veniceStoreVersionConfig.getStoreVersionName());
+    String topicName = veniceStoreVersionConfig.getStoreVersionName();
+
+    // For view topic, we need to use internal view store name
+    String storeName = VeniceView.isViewTopic(topicName)
+        ? VeniceView.parseStoreAndViewFromViewTopic(topicName)
+        : Version.parseStoreFromKafkaTopicName(topicName);
+    int versionNumber = Version.parseVersionFromKafkaTopicName(topicName);
 
     StoreVersionInfo storeVersionPair =
         Utils.waitStoreVersionOrThrow(veniceStoreVersionConfig.getStoreVersionName(), metadataRepo);
@@ -657,7 +662,6 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
         isVersionCurrent,
         veniceStoreVersionConfig,
         partitionId,
-        isIsolatedIngestion,
         cacheBackend,
         getInternalRecordTransformerConfig(storeName),
         zkHelixAdmin);
@@ -944,8 +948,8 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
   }
 
   /**
-   * Find the task that matches both the storeName and maximumVersion number, enable metrics emission for this task and
-   * update ingestion stats with this task; disable metric emission for all the task that doesn't max version.
+   * Find the task that matches both the storeName and maximumVersion number, enable Tehuti metrics emission for this
+   * task; disable Tehuti metrics emission for all tasks that don't match the max version.
    */
   protected void updateStatsEmission(
       NavigableMap<String, StoreIngestionTask> taskMap,
@@ -956,25 +960,25 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
       taskMap.forEach((topicName, task) -> {
         if (Version.parseStoreFromKafkaTopicName(topicName).equals(storeName)) {
           if (Version.parseVersionFromKafkaTopicName(topicName) < maximumVersion) {
-            task.disableMetricsEmission();
+            task.disableTehutiMetrics();
           } else {
-            task.enableMetricsEmission();
+            task.enableTehutiMetrics();
           }
         }
       });
     } else {
       /**
-       * The version push doesn't exist in this server node at all; it's possible the push for largest version has
-       * already been killed, so instead, emit metrics for the largest known batch push in this node.
+       * The version push doesn't exist in this server node at all; it's possible the push for the largest version has
+       * already been killed, so instead, enable Tehuti metrics for the largest known version in this node.
        */
       updateStatsEmission(taskMap, storeName);
     }
   }
 
   /**
-   * This function will go through all known ingestion task in this server node, find the task that matches the
-   * storeName and has the largest version number; if the task doesn't enable metric emission, enable it and
-   * update store ingestion stats.
+   * This function will go through all known ingestion tasks in this server node, find the task that matches the
+   * storeName and has the largest version number; if the task doesn't have Tehuti metrics emission enabled, enable it
+   * and disable Tehuti metrics emission for all lower version pushes.
    */
   protected void updateStatsEmission(NavigableMap<String, StoreIngestionTask> taskMap, String storeName) {
     int maxVersion = -1;
@@ -989,16 +993,16 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
         }
       }
     }
-    if (latestOngoingIngestionTask != null && !latestOngoingIngestionTask.isMetricsEmissionEnabled()) {
-      latestOngoingIngestionTask.enableMetricsEmission();
+    if (latestOngoingIngestionTask != null && !latestOngoingIngestionTask.isEmitTehutiMetricsEnabled()) {
+      latestOngoingIngestionTask.enableTehutiMetrics();
       /**
-       * Disable the metrics emission for all lower version pushes.
+       * Disable the Tehuti metrics emission for all lower version pushes.
        */
       Map.Entry<String, StoreIngestionTask> lowerVersionPush =
           taskMap.lowerEntry(Version.composeKafkaTopic(storeName, maxVersion));
       while (lowerVersionPush != null
           && Version.parseStoreFromKafkaTopicName(lowerVersionPush.getKey()).equals(storeName)) {
-        lowerVersionPush.getValue().disableMetricsEmission();
+        lowerVersionPush.getValue().disableTehutiMetrics();
         lowerVersionPush = taskMap.lowerEntry(lowerVersionPush.getKey());
       }
     }
@@ -1027,7 +1031,8 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
         return ingestionTask
             .unSubscribePartition(new PubSubTopicPartitionImpl(pubSubTopicRepository.getTopic(topic), partitionId));
       } else {
-        LOGGER.warn("Ignoring stop consumption message for Topic {} Partition {}", topic, partitionId);
+        LOGGER
+            .warn("Ignoring stop consumption message for topic-partition: {}", Utils.getReplicaId(topic, partitionId));
         return CompletableFuture.completedFuture(null);
       }
     }
@@ -1093,14 +1098,8 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
       // Must check the idle status again after acquiring the lock.
       StoreIngestionTask ingestionTask = topicNameToIngestionTaskMap.get(topicName);
       if (ingestionTask != null && !ingestionTask.hasAnySubscription()) {
-        if (isIsolatedIngestion) {
-          LOGGER.info(
-              "Ingestion task for topic {} will be kept open for the access from main process even though it has no subscription now.",
-              topicName);
-        } else {
-          LOGGER.info("Shutting down ingestion task of topic {}", topicName);
-          shutdownStoreIngestionTask(topicName);
-        }
+        LOGGER.info("Shutting down ingestion task of topic {}", topicName);
+        shutdownStoreIngestionTask(topicName);
       }
     }
   }
@@ -1197,12 +1196,12 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
       }
 
       /**
-       * For the same store, there will be only one task emitting metrics, if this is the only task that is emitting
-       * metrics, it means the latest ongoing push job is killed. In such case, find the largest version in the task
-       * map and enable metric emission.
+       * For the same store, there will be only one task emitting Tehuti metrics. If this is the only task that is
+       * emitting Tehuti metrics, it means the latest ongoing push job is killed. In such case, find the largest
+       * version in the task map and enable Tehuti metrics emission.
        */
-      if (consumerTask.isMetricsEmissionEnabled()) {
-        consumerTask.disableMetricsEmission();
+      if (consumerTask.isEmitTehutiMetricsEnabled()) {
+        consumerTask.disableTehutiMetrics();
         updateStatsEmission(topicNameToIngestionTaskMap, Version.parseStoreFromKafkaTopicName(topicName));
       }
     }
@@ -1264,8 +1263,15 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
     return result;
   }
 
+  @Override
   public void recordIngestionFailure(String storeName) {
     hostLevelIngestionStats.getStoreStats(storeName).recordIngestionFailure();
+  }
+
+  @Override
+  public void recordIngestionFailure(String storeName, int version, VeniceIngestionFailureReason reason) {
+    recordIngestionFailure(storeName);
+    versionedIngestionStats.recordIngestionFailureCount(storeName, version, reason);
   }
 
   @Override
@@ -1477,11 +1483,15 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
   private void resetConsumptionOffset(VeniceStoreVersionConfig veniceStore, int partitionId) {
     String topic = veniceStore.getStoreVersionName();
     StoreIngestionTask consumerTask = topicNameToIngestionTaskMap.get(topic);
-    if (consumerTask != null && consumerTask.isRunning()) {
-      consumerTask.resetPartitionConsumptionOffset(
-          new PubSubTopicPartitionImpl(pubSubTopicRepository.getTopic(topic), partitionId));
+    try {
+      if (consumerTask != null && consumerTask.isRunning()) {
+        consumerTask.resetPartitionConsumptionOffset(
+            new PubSubTopicPartitionImpl(pubSubTopicRepository.getTopic(topic), partitionId));
+      }
+      LOGGER.info("Offset reset to beginning - Replica: {}.", Utils.getReplicaId(topic, partitionId));
+    } catch (Exception e) {
+      LOGGER.warn("Error resetting replica offset for replica: {}.", Utils.getReplicaId(topic, partitionId));
     }
-    LOGGER.info("Offset reset to beginning - Replica: {}.", Utils.getReplicaId(topic, partitionId));
   }
 
   @VisibleForTesting
@@ -1515,6 +1525,25 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
     return storeNameToInternalRecordTransformerConfig.get(storeName);
   }
 
+  public void unregisterRecordTransformerConfig(String storeName) {
+    storeNameToInternalRecordTransformerConfig.remove(storeName);
+  }
+
+  @Override
+  public void registerBlobTransferDisabled(String storeName) {
+    blobTransferDisabledStores.add(storeName);
+  }
+
+  @Override
+  public void unregisterBlobTransferDisabled(String storeName) {
+    blobTransferDisabledStores.remove(storeName);
+  }
+
+  @Override
+  public boolean isBlobTransferDisabledForStore(String storeName) {
+    return blobTransferDisabledStores.contains(storeName);
+  }
+
   public void attemptToPrintIngestionInfoFor(String storeName, Integer version, Integer partition, String regionName) {
     try {
       PubSubTopic versionTopic = pubSubTopicRepository.getTopic(Version.composeKafkaTopic(storeName, version));
@@ -1528,9 +1557,8 @@ public class KafkaStoreIngestionService extends AbstractVeniceService implements
       PartitionConsumptionState partitionConsumptionState = storeIngestionTask.getPartitionConsumptionState(partition);
       if (partitionConsumptionState == null) {
         INGESTION_DEBUGGER_LOGGER.error(
-            "PartitionConsumptionState is not available for version topic: {}, partition {} when preparing ingestion info",
-            versionTopic,
-            partition);
+            "PartitionConsumptionState is not available for topic-partition: {} when preparing ingestion info",
+            Utils.getReplicaId(versionTopic, partition));
         return;
       }
       PubSubTopic ingestingTopic = versionTopic;

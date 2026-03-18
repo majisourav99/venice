@@ -18,6 +18,7 @@ import static com.linkedin.venice.ConfigKeys.TOPIC_CLEANUP_SLEEP_INTERVAL_BETWEE
 import static com.linkedin.venice.ConfigKeys.UNREGISTER_METRIC_FOR_DELETED_STORE_ENABLED;
 import static com.linkedin.venice.ConfigKeys.ZOOKEEPER_ADDRESS;
 
+import com.linkedin.venice.acl.VeniceComponent;
 import com.linkedin.venice.common.VeniceSystemStoreUtils;
 import com.linkedin.venice.controller.kafka.TopicCleanupService;
 import com.linkedin.venice.controller.stats.TopicCleanupServiceStats;
@@ -44,10 +45,12 @@ import io.tehuti.metrics.MetricsRepository;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -92,6 +95,8 @@ class AbstractTestVeniceHelixAdmin {
 
   final PubSubTopicRepository pubSubTopicRepository = new PubSubTopicRepository();
   List<VersionLifecycleEvent> versionLifecycleEvents = new ArrayList<>();
+  Set<String> etlOnboardedStoreVersionNames = new HashSet<>();
+  Set<String> etlOffboardedStoreVersionNames = new HashSet<>();
 
   enum VersionLifecycleEventType {
     CREATED, DELETED, BECOMING_CURRENT_FROM_FUTURE, BECOMING_CURRENT_FROM_BACKUP, BECOMING_BACKUP
@@ -158,6 +163,18 @@ class AbstractTestVeniceHelixAdmin {
     }
   };
 
+  ExternalETLService mockExternalETLService = new ExternalETLService() {
+    @Override
+    public void onboardETL(Store store, Version version) {
+      etlOnboardedStoreVersionNames.add(version.kafkaTopicName());
+    }
+
+    @Override
+    public void offboardETL(Store store, Version version) {
+      etlOffboardedStoreVersionNames.add(version.kafkaTopicName());
+    }
+  };
+
   public void setupCluster(MetricsRepository metricsRepository) throws Exception {
     Utils.thisIsLocalhost();
     zkServerWrapper = ServiceFactory.getZkServer();
@@ -179,7 +196,8 @@ class AbstractTestVeniceHelixAdmin {
         pubSubTopicRepository,
         pubSubBrokerWrapper.getPubSubClientsFactory(),
         pubSubBrokerWrapper.getPubSubPositionTypeRegistry(),
-        Optional.of(mockVersionLifecycleEventListener));
+        Optional.of(Collections.singletonList(mockVersionLifecycleEventListener)),
+        Optional.of(mockExternalETLService));
     veniceAdmin.initStorageCluster(clusterName);
     this.topicCleanupService = new TopicCleanupService(
         veniceAdmin,
@@ -239,7 +257,10 @@ class AbstractTestVeniceHelixAdmin {
         clusterName,
         new ZkClient(zkAddress),
         new HelixAdapterSerializer(),
-        LogContext.EMPTY,
+        LogContext.newBuilder()
+            .setComponentName(VeniceComponent.CONTROLLER.name())
+            .setRegionName("test-region")
+            .build(),
         3);
 
     MockTestStateModelFactory stateModelFactory;
@@ -341,5 +362,10 @@ class AbstractTestVeniceHelixAdmin {
 
   void resetVersionLifecycleEvents() {
     versionLifecycleEvents.clear();
+  }
+
+  void resetExternalETLServiceEvents() {
+    etlOnboardedStoreVersionNames.clear();
+    etlOffboardedStoreVersionNames.clear();
   }
 }

@@ -17,6 +17,7 @@ import com.linkedin.venice.security.SSLFactory;
 import io.grpc.ServerInterceptor;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.socket.SocketChannel;
+import io.netty.util.Attribute;
 import io.tehuti.metrics.MetricsRepository;
 import java.util.List;
 import java.util.Optional;
@@ -46,6 +47,7 @@ public class HttpChannelInitializerTest {
     storeMetadataRepository = mock(ReadOnlyStoreRepository.class);
     metricsRepository = new MetricsRepository();
     sslFactory = mock(SSLFactory.class);
+    doReturn(new SSLConfig()).when(sslFactory).getSSLConfig();
     sslFactoryOptional = Optional.of(sslFactory);
     sslHandshakeExecutor = mock(ThreadPoolExecutor.class);
     accessController = Optional.of(mock(StaticAccessController.class));
@@ -102,6 +104,7 @@ public class HttpChannelInitializerTest {
     ChannelPipeline channelPipeline = mock(ChannelPipeline.class);
     SocketChannel ch = mock(SocketChannel.class);
     doReturn(channelPipeline).when(ch).pipeline();
+    doReturn(mock(Attribute.class)).when(ch).attr(any());
     doReturn(channelPipeline).when(channelPipeline).addLast(any());
     HttpChannelInitializer initializer = new HttpChannelInitializer(
         storeMetadataRepository,

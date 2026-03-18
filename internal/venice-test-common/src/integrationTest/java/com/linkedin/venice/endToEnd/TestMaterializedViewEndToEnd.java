@@ -1,12 +1,11 @@
 package com.linkedin.venice.endToEnd;
 
 import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_BLOCK_CACHE_SIZE_IN_BYTES;
-import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_PLAIN_TABLE_FORMAT_ENABLED;
 import static com.linkedin.venice.ConfigKeys.CHILD_DATA_CENTER_KAFKA_URL_PREFIX;
 import static com.linkedin.venice.ConfigKeys.CLIENT_SYSTEM_STORE_REPOSITORY_REFRESH_INTERVAL_SECONDS;
+import static com.linkedin.venice.ConfigKeys.CLIENT_USE_REQUEST_BASED_METADATA_REPOSITORY;
 import static com.linkedin.venice.ConfigKeys.CLIENT_USE_SYSTEM_STORE_REPOSITORY;
 import static com.linkedin.venice.ConfigKeys.DATA_BASE_PATH;
-import static com.linkedin.venice.ConfigKeys.KAFKA_BOOTSTRAP_SERVERS;
 import static com.linkedin.venice.ConfigKeys.PERSISTENCE_TYPE;
 import static com.linkedin.venice.integration.utils.DaVinciTestContext.getCachingDaVinciClientFactory;
 import static com.linkedin.venice.integration.utils.VeniceClusterWrapperConstants.DEFAULT_PARENT_DATA_CENTER_REGION_NAME;
@@ -30,24 +29,25 @@ import com.linkedin.davinci.client.DaVinciConfig;
 import com.linkedin.davinci.client.factory.CachingDaVinciClientFactory;
 import com.linkedin.davinci.consumer.ChangeEvent;
 import com.linkedin.davinci.consumer.ChangelogClientConfig;
+import com.linkedin.davinci.consumer.StatefulVeniceChangelogConsumer;
 import com.linkedin.davinci.consumer.VeniceAfterImageConsumerImpl;
 import com.linkedin.davinci.consumer.VeniceChangeCoordinate;
 import com.linkedin.davinci.consumer.VeniceChangelogConsumer;
 import com.linkedin.davinci.consumer.VeniceChangelogConsumerClientFactory;
+import com.linkedin.davinci.consumer.VeniceChangelogConsumerDaVinciRecordTransformerImpl;
 import com.linkedin.venice.D2.D2ClientUtils;
 import com.linkedin.venice.compression.CompressionStrategy;
+import com.linkedin.venice.consumer.ChangelogConsumerTestUtils;
 import com.linkedin.venice.controller.VeniceHelixAdmin;
 import com.linkedin.venice.controllerapi.ControllerClient;
 import com.linkedin.venice.controllerapi.StoreResponse;
 import com.linkedin.venice.controllerapi.UpdateStoreQueryParams;
 import com.linkedin.venice.integration.utils.D2TestUtils;
-import com.linkedin.venice.integration.utils.ServiceFactory;
+import com.linkedin.venice.integration.utils.PubSubBrokerWrapper;
 import com.linkedin.venice.integration.utils.VeniceClusterWrapper;
-import com.linkedin.venice.integration.utils.VeniceControllerWrapper;
 import com.linkedin.venice.integration.utils.VeniceMultiClusterWrapper;
-import com.linkedin.venice.integration.utils.VeniceMultiRegionClusterCreateOptions;
 import com.linkedin.venice.integration.utils.VeniceRouterWrapper;
-import com.linkedin.venice.integration.utils.VeniceTwoLayerMultiRegionMultiClusterWrapper;
+import com.linkedin.venice.integration.utils.ZkServerWrapper;
 import com.linkedin.venice.meta.MaterializedViewParameters;
 import com.linkedin.venice.meta.PersistenceType;
 import com.linkedin.venice.meta.Version;
@@ -78,6 +78,7 @@ import it.unimi.dsi.fastutil.ints.Int2LongOpenHashMap;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -89,49 +90,31 @@ import org.apache.avro.Schema;
 import org.apache.avro.util.Utf8;
 import org.apache.samza.system.SystemProducer;
 import org.testng.Assert;
-import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 
-public class TestMaterializedViewEndToEnd {
+public class TestMaterializedViewEndToEnd extends AbstractMultiRegionTest {
   private static final int TEST_TIMEOUT = 2 * Time.MS_PER_MINUTE;
   private static final String[] CLUSTER_NAMES =
       IntStream.range(0, 1).mapToObj(i -> "venice-cluster" + i).toArray(String[]::new);
-
-  private List<VeniceMultiClusterWrapper> childDatacenters;
-  private List<VeniceControllerWrapper> parentControllers;
-  private VeniceTwoLayerMultiRegionMultiClusterWrapper multiRegionMultiClusterWrapper;
+  private static final String DEFAULT_VIEW_NAME = "MaterializedViewTest";
   private String clusterName;
 
-  @BeforeClass(alwaysRun = true)
-  public void setUp() {
+  @Override
+  protected Properties getExtraServerProperties() {
     Properties serverProperties = new Properties();
-    serverProperties.put(ROCKSDB_PLAIN_TABLE_FORMAT_ENABLED, false);
     serverProperties.put(
         CHILD_DATA_CENTER_KAFKA_URL_PREFIX + "." + DEFAULT_PARENT_DATA_CENTER_REGION_NAME,
         "localhost:" + TestUtils.getFreePort());
-    VeniceMultiRegionClusterCreateOptions.Builder optionsBuilder =
-        new VeniceMultiRegionClusterCreateOptions.Builder().numberOfRegions(2)
-            .numberOfClusters(1)
-            .numberOfParentControllers(1)
-            .numberOfChildControllers(1)
-            .numberOfServers(2)
-            .numberOfRouters(1)
-            .replicationFactor(2)
-            .forkServer(false)
-            .serverProperties(serverProperties);
-    multiRegionMultiClusterWrapper =
-        ServiceFactory.getVeniceTwoLayerMultiRegionMultiClusterWrapper(optionsBuilder.build());
-
-    childDatacenters = multiRegionMultiClusterWrapper.getChildRegions();
-    parentControllers = multiRegionMultiClusterWrapper.getParentControllers();
-    clusterName = CLUSTER_NAMES[0];
+    return serverProperties;
   }
 
-  @AfterClass(alwaysRun = true)
-  public void cleanUp() {
-    multiRegionMultiClusterWrapper.close();
+  @Override
+  @BeforeClass(alwaysRun = true)
+  public void setUp() {
+    super.setUp();
+    clusterName = multiRegionMultiClusterWrapper.getClusterNames()[0];
   }
 
   @Test(timeOut = TEST_TIMEOUT)
@@ -142,7 +125,7 @@ public class TestMaterializedViewEndToEnd {
     String inputDirPath = "file:" + inputDir.getAbsolutePath();
     String storeName = Utils.getUniqueString("store");
     Properties props = TestWriteUtils.defaultVPJProps(
-        parentControllers.get(0).getControllerUrl(),
+        getParentControllerUrl(),
         inputDirPath,
         storeName,
         multiRegionMultiClusterWrapper.getPubSubClientProperties());
@@ -157,10 +140,9 @@ public class TestMaterializedViewEndToEnd {
         .setPartitionCount(3);
     try (ControllerClient controllerClient =
         IntegrationTestPushUtils.createStoreForJob(clusterName, keySchemaStr, valueSchemaStr, props, storeParms)) {
-      String testViewName = "MaterializedViewTest";
       MaterializedViewParameters.Builder viewParamBuilder =
-          new MaterializedViewParameters.Builder(testViewName).setPartitionCount(6);
-      UpdateStoreQueryParams updateViewParam = new UpdateStoreQueryParams().setViewName(testViewName)
+          new MaterializedViewParameters.Builder(DEFAULT_VIEW_NAME).setPartitionCount(6);
+      UpdateStoreQueryParams updateViewParam = new UpdateStoreQueryParams().setViewName(DEFAULT_VIEW_NAME)
           .setViewClassName(MaterializedView.class.getCanonicalName())
           .setViewClassParams(viewParamBuilder.build());
       controllerClient
@@ -168,21 +150,22 @@ public class TestMaterializedViewEndToEnd {
       TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, false, () -> {
         Map<String, ViewConfig> viewConfigMap = controllerClient.getStore(storeName).getStore().getViewConfigs();
         assertEquals(viewConfigMap.size(), 1);
-        assertEquals(viewConfigMap.get(testViewName).getViewClassName(), MaterializedView.class.getCanonicalName());
-        assertEquals(viewConfigMap.get(testViewName).getViewParameters().size(), 3);
+        assertEquals(
+            viewConfigMap.get(DEFAULT_VIEW_NAME).getViewClassName(),
+            MaterializedView.class.getCanonicalName());
+        assertEquals(viewConfigMap.get(DEFAULT_VIEW_NAME).getViewParameters().size(), 3);
       });
 
       IntegrationTestPushUtils.runVPJ(props);
       // TODO we will verify the actual content once the DVC consumption part of the view topic is completed.
       // For now just check for topic existence and that they contain some records.
-      String viewTopicName =
-          Version.composeKafkaTopic(storeName, 1) + VIEW_NAME_SEPARATOR + testViewName + MATERIALIZED_VIEW_TOPIC_SUFFIX;
+      String viewTopicName = MaterializedView.composeTopicName(storeName, 1, DEFAULT_VIEW_NAME);
       String versionTopicName = Version.composeKafkaTopic(storeName, 1);
       validateViewTopicAndVersionTopic(viewTopicName, versionTopicName, 6, 3, 100);
 
       // A re-push should succeed
       Properties rePushProps = TestWriteUtils.defaultVPJProps(
-          parentControllers.get(0).getControllerUrl(),
+          getParentControllerUrl(),
           inputDirPath,
           storeName,
           multiRegionMultiClusterWrapper.getPubSubClientProperties());
@@ -203,22 +186,21 @@ public class TestMaterializedViewEndToEnd {
           });
         }
       }
-      String rePushViewTopicName =
-          Version.composeKafkaTopic(storeName, 2) + VIEW_NAME_SEPARATOR + testViewName + MATERIALIZED_VIEW_TOPIC_SUFFIX;
+      String rePushViewTopicName = MaterializedView.composeTopicName(storeName, 2, DEFAULT_VIEW_NAME);
       String rePushVersionTopicName = Version.composeKafkaTopic(storeName, 2);
       validateViewTopicAndVersionTopic(rePushViewTopicName, rePushVersionTopicName, 6, 3, 100);
     }
   }
 
   @Test(timeOut = TEST_TIMEOUT)
-  public void testBatchOnlyMaterializedViewDVCConsumer() throws IOException, ExecutionException, InterruptedException {
+  public void testBatchOnlyMaterializedViewDVCConsumer() throws Exception {
     // Create a batch only store with materialized view and run batch push job with 100 records
     File inputDir = getTempDataDirectory();
     Schema recordSchema = TestWriteUtils.writeSimpleAvroFileWithStringToStringSchema(inputDir);
     String inputDirPath = "file:" + inputDir.getAbsolutePath();
     String storeName = Utils.getUniqueString("batchStore");
     Properties props = TestWriteUtils.defaultVPJProps(
-        parentControllers.get(0).getControllerUrl(),
+        getParentControllerUrl(),
         inputDirPath,
         storeName,
         multiRegionMultiClusterWrapper.getPubSubClientProperties());
@@ -247,6 +229,7 @@ public class TestMaterializedViewEndToEnd {
       });
     }
     IntegrationTestPushUtils.runVPJ(props);
+
     // Start a DVC client that's subscribed to partition 0 of the store's materialized view. The DVC client should
     // contain all data records.
     VeniceProperties backendConfig =
@@ -292,7 +275,7 @@ public class TestMaterializedViewEndToEnd {
       TestWriteUtils.writeSimpleAvroFileWithStringToStringSchema(newPushInputDir, 200);
       String newPushInputDirPath = "file:" + newPushInputDir.getAbsolutePath();
       Properties newPushProps = TestWriteUtils.defaultVPJProps(
-          parentControllers.get(0).getControllerUrl(),
+          getParentControllerUrl(),
           newPushInputDirPath,
           storeName,
           multiRegionMultiClusterWrapper.getPubSubClientProperties());
@@ -313,6 +296,7 @@ public class TestMaterializedViewEndToEnd {
     } finally {
       D2ClientUtils.shutdownClient(daVinciD2RemoteFabric);
     }
+
     // Make sure things work in the source fabric too.
     VeniceProperties newBackendConfig =
         new PropertyBuilder().put(DATA_BASE_PATH, Utils.getTempDataDirectory().getAbsolutePath())
@@ -353,7 +337,7 @@ public class TestMaterializedViewEndToEnd {
     String inputDirPath = "file:" + inputDir.getAbsolutePath();
     String storeName = Utils.getUniqueString("largeValueBatchStore");
     Properties props = TestWriteUtils.defaultVPJProps(
-        parentControllers.get(0).getControllerUrl(),
+        getParentControllerUrl(),
         inputDirPath,
         storeName,
         multiRegionMultiClusterWrapper.getPubSubClientProperties());
@@ -426,7 +410,7 @@ public class TestMaterializedViewEndToEnd {
     String inputDirPath = "file:" + inputDir.getAbsolutePath();
     String storeName = Utils.getUniqueString("largeValueBatchStore");
     Properties props = TestWriteUtils.defaultVPJProps(
-        parentControllers.get(0).getControllerUrl(),
+        getParentControllerUrl(),
         inputDirPath,
         storeName,
         multiRegionMultiClusterWrapper.getPubSubClientProperties());
@@ -456,11 +440,11 @@ public class TestMaterializedViewEndToEnd {
     }
     IntegrationTestPushUtils.runVPJ(props);
     // Start a CC consumer in remote region to make sure it can consume all the records properly.
-    Properties consumerProperties = new Properties();
-    consumerProperties.putAll(multiRegionMultiClusterWrapper.getPubSubClientProperties());
-    consumerProperties.put(
-        KAFKA_BOOTSTRAP_SERVERS,
-        multiRegionMultiClusterWrapper.getChildRegions().get(1).getPubSubBrokerWrapper().getAddress());
+    Properties consumerProperties = ChangelogConsumerTestUtils.buildConsumerProperties(
+        multiRegionMultiClusterWrapper,
+        multiRegionMultiClusterWrapper.getChildRegions().get(1).getPubSubBrokerWrapper(),
+        clusterName,
+        multiRegionMultiClusterWrapper.getChildRegions().get(1).getZkServerWrapper());
     ChangelogClientConfig viewChangeLogClientConfig = new ChangelogClientConfig().setViewName(testViewName)
         .setConsumerProperties(consumerProperties)
         .setControllerD2ServiceName(D2_SERVICE_NAME)
@@ -492,14 +476,14 @@ public class TestMaterializedViewEndToEnd {
    * read path. Once CC with views is supported we should use CC to verify. Perform re-push to ensure we can deserialize
    * value properly during re-push.
    */
-  @Test(timeOut = TEST_TIMEOUT)
+  @Test(timeOut = 3 * Time.MS_PER_MINUTE)
   public void testMaterializedViewWithComplexPartitioner() throws IOException {
     File inputDir = getTempDataDirectory();
     Schema recordSchema = TestWriteUtils.writeSimpleAvroFileWithStringToNameRecordV2Schema(inputDir);
     String inputDirPath = "file:" + inputDir.getAbsolutePath();
     String storeName = Utils.getUniqueString("complexPartitionStore");
     Properties props = TestWriteUtils.defaultVPJProps(
-        parentControllers.get(0).getControllerUrl(),
+        getParentControllerUrl(),
         inputDirPath,
         storeName,
         multiRegionMultiClusterWrapper.getPubSubClientProperties());
@@ -589,13 +573,141 @@ public class TestMaterializedViewEndToEnd {
     }
     // A re-push should succeed
     Properties rePushProps = TestWriteUtils.defaultVPJProps(
-        parentControllers.get(0).getControllerUrl(),
+        getParentControllerUrl(),
         inputDirPath,
         storeName,
         multiRegionMultiClusterWrapper.getPubSubClientProperties());
     rePushProps.setProperty(SOURCE_KAFKA, "true");
     rePushProps.setProperty(KAFKA_INPUT_BROKER_URL, childDatacenters.get(0).getPubSubBrokerWrapper().getAddress());
     IntegrationTestPushUtils.runVPJ(rePushProps);
+  }
+
+  @Test(timeOut = TEST_TIMEOUT)
+  public void testBatchOnlyMaterializedViewStatelessCDCConsumer() throws Exception {
+    testBatchOnlyMaterializedViewCDCConsumer(false);
+  }
+
+  private void testBatchOnlyMaterializedViewCDCConsumer(boolean useStatefulConsumer) throws Exception {
+    // Create a batch only store with materialized view and run batch push job with 100 records
+    File inputDir = getTempDataDirectory();
+    Schema recordSchema = TestWriteUtils.writeSimpleAvroFileWithStringToStringSchema(inputDir);
+    String inputDirPath = "file:" + inputDir.getAbsolutePath();
+    String storeName = Utils.getUniqueString("batchStore");
+
+    // Setup store and materialized view
+    setupStoreAndMaterializedView(inputDirPath, storeName, DEFAULT_VIEW_NAME, recordSchema);
+
+    // Setup D2Client and ChangelogClientConfig
+    D2Client d2Client = D2TestUtils
+        .getAndStartD2Client(multiRegionMultiClusterWrapper.getChildRegions().get(0).getZkServerWrapper().getAddress());
+
+    try {
+      ChangelogClientConfig changelogClientConfig =
+          createChangelogClientConfig(d2Client, inputDirPath, DEFAULT_VIEW_NAME);
+
+      // Test CDC consumer
+      testCDCConsumer(storeName, changelogClientConfig, useStatefulConsumer);
+    } finally {
+      D2ClientUtils.shutdownClient(d2Client);
+    }
+  }
+
+  private void setupStoreAndMaterializedView(
+      String inputDirPath,
+      String storeName,
+      String testViewName,
+      Schema recordSchema) {
+    Properties props = TestWriteUtils.defaultVPJProps(
+        getParentControllerUrl(),
+        inputDirPath,
+        storeName,
+        multiRegionMultiClusterWrapper.getPubSubClientProperties());
+    String keySchemaStr = recordSchema.getField(DEFAULT_KEY_FIELD_PROP).schema().toString();
+    String valueSchemaStr = recordSchema.getField(DEFAULT_VALUE_FIELD_PROP).schema().toString();
+    UpdateStoreQueryParams storeParms = new UpdateStoreQueryParams().setActiveActiveReplicationEnabled(false)
+        .setChunkingEnabled(true)
+        .setRmdChunkingEnabled(true)
+        .setNativeReplicationEnabled(true)
+        .setNativeReplicationSourceFabric(childDatacenters.get(0).getRegionName())
+        .setPartitionCount(3);
+
+    try (ControllerClient controllerClient =
+        IntegrationTestPushUtils.createStoreForJob(clusterName, keySchemaStr, valueSchemaStr, props, storeParms)) {
+      MaterializedViewParameters.Builder viewParamBuilder =
+          new MaterializedViewParameters.Builder(testViewName).setPartitionCount(1);
+      UpdateStoreQueryParams updateViewParam = new UpdateStoreQueryParams().setViewName(testViewName)
+          .setViewClassName(MaterializedView.class.getCanonicalName())
+          .setViewClassParams(viewParamBuilder.build());
+      controllerClient
+          .retryableRequest(5, controllerClient1 -> controllerClient.updateStore(storeName, updateViewParam));
+      TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, false, () -> {
+        Map<String, ViewConfig> viewConfigMap = controllerClient.getStore(storeName).getStore().getViewConfigs();
+        assertEquals(viewConfigMap.size(), 1);
+        assertEquals(viewConfigMap.get(testViewName).getViewClassName(), MaterializedView.class.getCanonicalName());
+      });
+    }
+    IntegrationTestPushUtils.runVPJ(props);
+  }
+
+  private ChangelogClientConfig createChangelogClientConfig(
+      D2Client d2Client,
+      String inputDirPath,
+      String testViewName) {
+    ZkServerWrapper localZkServer = multiRegionMultiClusterWrapper.getChildRegions().get(0).getZkServerWrapper();
+    PubSubBrokerWrapper localKafka = multiRegionMultiClusterWrapper.getChildRegions().get(0).getPubSubBrokerWrapper();
+    Properties consumerProperties = ChangelogConsumerTestUtils.buildConsumerProperties(
+        multiRegionMultiClusterWrapper,
+        localKafka,
+        clusterName,
+        localZkServer,
+        Utils.getUniqueString(inputDirPath));
+    consumerProperties.put(CLIENT_USE_REQUEST_BASED_METADATA_REPOSITORY, true);
+
+    return new ChangelogClientConfig().setConsumerProperties(consumerProperties)
+        .setControllerD2ServiceName(D2_SERVICE_NAME)
+        .setD2ServiceName(VeniceRouterWrapper.CLUSTER_DISCOVERY_D2_SERVICE_NAME)
+        .setLocalD2ZkHosts(localZkServer.getAddress())
+        .setControllerRequestRetryCount(3)
+        .setVersionSwapDetectionIntervalTimeInSeconds(3)
+        .setD2Client(d2Client)
+        .setViewName(testViewName)
+        .setIsNewStatelessClientEnabled(true);
+  }
+
+  private void testCDCConsumer(
+      String storeName,
+      ChangelogClientConfig changelogClientConfig,
+      boolean useStatefulConsumer) throws Exception {
+    MetricsRepository metricsRepository = new MetricsRepository();
+    VeniceChangelogConsumerClientFactory consumerFactory =
+        new VeniceChangelogConsumerClientFactory(changelogClientConfig, metricsRepository);
+
+    final List<PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate>> pubSubMessages = new ArrayList<>();
+
+    if (useStatefulConsumer) {
+      try (StatefulVeniceChangelogConsumer<Integer, Utf8> viewTopicConsumer =
+          consumerFactory.getStatefulChangelogConsumer(storeName)) {
+        Assert.assertTrue(viewTopicConsumer instanceof VeniceChangelogConsumerDaVinciRecordTransformerImpl);
+        viewTopicConsumer.start().get();
+        TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, false, () -> {
+          Collection<PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate>> polled =
+              viewTopicConsumer.poll(1000);
+          pubSubMessages.addAll(polled);
+          Assert.assertEquals(pubSubMessages.size(), 100);
+        });
+      }
+    } else {
+      try (VeniceChangelogConsumer<Integer, Utf8> viewTopicConsumer = consumerFactory.getChangelogConsumer(storeName)) {
+        Assert.assertTrue(viewTopicConsumer instanceof VeniceChangelogConsumerDaVinciRecordTransformerImpl);
+        viewTopicConsumer.subscribeAll().get();
+        TestUtils.waitForNonDeterministicAssertion(30, TimeUnit.SECONDS, false, () -> {
+          Collection<PubSubMessage<Integer, ChangeEvent<Utf8>, VeniceChangeCoordinate>> polled =
+              viewTopicConsumer.poll(1000);
+          pubSubMessages.addAll(polled);
+          Assert.assertEquals(pubSubMessages.size(), 100);
+        });
+      }
+    }
   }
 
   private double getMetric(MetricsRepository metricsRepository, String metricName, String storeName) {

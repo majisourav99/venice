@@ -65,7 +65,7 @@ public class LogCompactionStatsTest extends AbstractTestVeniceParentHelixAdmin {
 
     // test validation
     validateLongPointFromDataFromSum(
-        ControllerMetricEntity.STORE_REPUSH_CALL_COUNT.getMetricName(),
+        LogCompactionStats.LogCompactionOtelMetricEntity.STORE_REPUSH_CALL_COUNT.getMetricName(),
         1,
         expectedAttributesForRepushCount);
 
@@ -80,7 +80,7 @@ public class LogCompactionStatsTest extends AbstractTestVeniceParentHelixAdmin {
     if (isManualTrigger) {
       try {
         validateLongPointFromDataFromSum(
-            ControllerMetricEntity.STORE_COMPACTION_TRIGGERED_COUNT.getMetricName(),
+            LogCompactionStats.LogCompactionOtelMetricEntity.STORE_COMPACTION_TRIGGERED_COUNT.getMetricName(),
             1,
             expectedAttributesForCompactionTriggered);
         fail("Compaction triggered metric should NOT be emitted for manual trigger");
@@ -93,7 +93,7 @@ public class LogCompactionStatsTest extends AbstractTestVeniceParentHelixAdmin {
     } else {
       // For scheduled trigger, the compaction triggered metric should also be emitted
       validateLongPointFromDataFromSum(
-          ControllerMetricEntity.STORE_COMPACTION_TRIGGERED_COUNT.getMetricName(),
+          LogCompactionStats.LogCompactionOtelMetricEntity.STORE_COMPACTION_TRIGGERED_COUNT.getMetricName(),
           1,
           expectedAttributesForCompactionTriggered);
     }
@@ -118,7 +118,7 @@ public class LogCompactionStatsTest extends AbstractTestVeniceParentHelixAdmin {
 
     // test validation
     validateLongPointFromDataFromSum(
-        ControllerMetricEntity.STORE_REPUSH_CALL_COUNT.getMetricName(),
+        LogCompactionStats.LogCompactionOtelMetricEntity.STORE_REPUSH_CALL_COUNT.getMetricName(),
         1,
         expectedAttributes);
   }
@@ -144,7 +144,7 @@ public class LogCompactionStatsTest extends AbstractTestVeniceParentHelixAdmin {
 
     // test validation
     validateLongPointFromDataFromSum(
-        ControllerMetricEntity.STORE_REPUSH_CALL_COUNT.getMetricName(),
+        LogCompactionStats.LogCompactionOtelMetricEntity.STORE_REPUSH_CALL_COUNT.getMetricName(),
         1,
         expectedAttributes);
   }
@@ -161,7 +161,7 @@ public class LogCompactionStatsTest extends AbstractTestVeniceParentHelixAdmin {
 
     // test validation
     validateLongPointFromDataFromGauge(
-        ControllerMetricEntity.STORE_COMPACTION_ELIGIBLE_STATE.getMetricName(),
+        LogCompactionStats.LogCompactionOtelMetricEntity.STORE_COMPACTION_ELIGIBLE_STATE.getMetricName(),
         1,
         expectedAttributes);
   }
@@ -178,7 +178,7 @@ public class LogCompactionStatsTest extends AbstractTestVeniceParentHelixAdmin {
 
     // test validation
     validateLongPointFromDataFromGauge(
-        ControllerMetricEntity.STORE_COMPACTION_ELIGIBLE_STATE.getMetricName(),
+        LogCompactionStats.LogCompactionOtelMetricEntity.STORE_COMPACTION_ELIGIBLE_STATE.getMetricName(),
         0,
         expectedAttributes);
   }
@@ -195,7 +195,7 @@ public class LogCompactionStatsTest extends AbstractTestVeniceParentHelixAdmin {
 
     // test validation
     validateLongPointFromDataFromSum(
-        ControllerMetricEntity.STORE_COMPACTION_NOMINATED_COUNT.getMetricName(),
+        LogCompactionStats.LogCompactionOtelMetricEntity.STORE_COMPACTION_NOMINATED_COUNT.getMetricName(),
         1,
         expectedAttributes);
   }

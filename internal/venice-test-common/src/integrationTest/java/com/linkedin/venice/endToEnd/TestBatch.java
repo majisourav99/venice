@@ -62,6 +62,7 @@ import com.linkedin.venice.controllerapi.UpdateStoreQueryParams;
 import com.linkedin.venice.controllerapi.VersionCreationResponse;
 import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.integration.utils.VeniceClusterWrapper;
+import com.linkedin.venice.integration.utils.VeniceRouterWrapper;
 import com.linkedin.venice.meta.BackupStrategy;
 import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.read.RequestType;
@@ -91,6 +92,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -408,6 +410,64 @@ public abstract class TestBatch {
         repushedDict,
         sourceDict,
         "The dict of repushed version should be different from the source version");
+  }
+
+  /**
+   * Tests that when a store with ZSTD_WITH_DICT compression is pushed twice (v1 and v2 with different data),
+   * the router downloads the new dictionary for v2 and the read path returns the correct v2 data.
+   * This validates that DictionaryRetrievalService correctly fetches updated dictionaries on version swap.
+   */
+  @Test(timeOut = TEST_TIMEOUT * 2)
+  public void testNewPushWithNewerDictionaryIsServedCorrectly() throws Exception {
+    // Push v1 with ZSTD_WITH_DICT compression
+    String storeName = testBatchStore(
+        inputDir -> new KeyAndValueSchemas(writeSimpleAvroFileWithStringToStringSchema(inputDir)),
+        properties -> {},
+        (avroClient, vsonClient, metricsRepository) -> {
+          for (int i = 1; i <= 100; i++) {
+            Assert.assertEquals(avroClient.get(Integer.toString(i)).get().toString(), "test_name_" + i);
+          }
+        },
+        new UpdateStoreQueryParams().setCompressionStrategy(CompressionStrategy.ZSTD_WITH_DICT));
+
+    // Push v2 with ZSTD_WITH_DICT compression and different data — router must download the new dictionary
+    VPJValidator v2Validator = (avroClient, vsonClient, metricsRepository) -> {
+      // test single get — expect v2 data
+      for (int i = 1; i <= 100; i++) {
+        Assert.assertEquals(avroClient.get(Integer.toString(i)).get().toString(), "alternate_test_name_" + i);
+      }
+
+      // test batch get — expect v2 data
+      for (int i = 0; i < 10; i++) {
+        Set<String> keys = new HashSet<>();
+        for (int j = 1; j <= 10; j++) {
+          keys.add(Integer.toString(i * 10 + j));
+        }
+        Map<CharSequence, CharSequence> values = (Map<CharSequence, CharSequence>) avroClient.batchGet(keys).get();
+        Assert.assertEquals(values.size(), 10);
+        for (int j = 1; j <= 10; j++) {
+          Assert.assertEquals(
+              values.get(Integer.toString(i * 10 + j)).toString(),
+              "alternate_test_name_" + ((i * 10) + j));
+        }
+      }
+    };
+    testBatchStore(
+        inputDir -> new KeyAndValueSchemas(writeAlternateSimpleAvroFileWithStringToStringSchema(inputDir)),
+        properties -> {},
+        v2Validator,
+        storeName,
+        new UpdateStoreQueryParams().setCompressionStrategy(CompressionStrategy.ZSTD_WITH_DICT).setPartitionCount(3));
+
+    // Verify that v1 and v2 have different dictionaries (different data produces different dictionaries)
+    Properties props = new Properties();
+    props.setProperty(KAFKA_BOOTSTRAP_SERVERS, veniceCluster.getPubSubBrokerWrapper().getAddress());
+    VeniceProperties veniceProperties = new VeniceProperties(props);
+    ByteBuffer v1Dict =
+        DictionaryUtils.readDictionaryFromKafka(Version.composeKafkaTopic(storeName, 1), veniceProperties);
+    ByteBuffer v2Dict =
+        DictionaryUtils.readDictionaryFromKafka(Version.composeKafkaTopic(storeName, 2), veniceProperties);
+    Assert.assertNotEquals(v2Dict, v1Dict, "v2 dictionary should differ from v1 since data changed");
   }
 
   @Test(timeOut = TEST_TIMEOUT)
@@ -919,7 +979,33 @@ public abstract class TestBatch {
       IntegrationTestPushUtils.runVPJ(props);
     }
 
-    veniceCluster.refreshAllRouterMetaData();
+    // Wait for the current version to be set AND the router's routing data to be ready.
+    // There is a race where VPJ returns (version is COMPLETED) but: (a) the version has not
+    // yet transitioned to ONLINE / been set as current, or (b) the Helix external view hasn't
+    // propagated to the router's routing data repository, or (c) the router's
+    // DictionaryRetrievalService hasn't finished downloading the ZSTD dictionary (for stores
+    // with ZSTD_WITH_DICT compression). All of these cause "no version for store" from
+    // VeniceVersionFinder.
+    veniceCluster.useControllerClient(controllerClient -> {
+      TestUtils.waitForNonDeterministicAssertion(
+          STORE_VERSION_AVAILABILITY_TIMEOUT_SEC,
+          TimeUnit.SECONDS,
+          true,
+          true,
+          () -> {
+            int currentVersion = controllerClient.getStore(storeName).getStore().getCurrentVersion();
+            Assert.assertTrue(currentVersion > 0, "Store " + storeName + " does not have a current version yet");
+            veniceCluster.refreshAllRouterMetaData();
+            String kafkaTopic = Version.composeKafkaTopic(storeName, currentVersion);
+            for (VeniceRouterWrapper router: veniceCluster.getVeniceRouters()) {
+              if (router.isRunning()) {
+                Assert.assertTrue(
+                    router.getRoutingDataRepository().containsKafkaTopic(kafkaTopic),
+                    "Router routing data not ready for " + kafkaTopic);
+              }
+            }
+          });
+    });
 
     VeniceMetricsRepository metricsRepository = getVeniceMetricsRepository(THIN_CLIENT, CLIENT_METRIC_ENTITIES, true);
     try (
@@ -929,7 +1015,23 @@ public abstract class TestBatch {
                 .setMetricsRepository(metricsRepository)); // metrics only available for Avro client...
         AvroGenericStoreClient vsonClient = ClientFactory.getAndStartGenericAvroClient(
             ClientConfig.defaultVsonGenericClientConfig(storeName).setVeniceURL(veniceCluster.getRandomRouterURL()))) {
-      dataValidator.validate(avroClient, vsonClient, metricsRepository);
+      // Wrap the validator in a retry loop because even after the routing data check above,
+      // the router may not be fully ready to serve reads. The VeniceVersionFinder checks
+      // additional state beyond containsKafkaTopic: it verifies all partitions have
+      // ready-to-serve instances (isPartitionResourcesReady) AND that the ZSTD dictionary
+      // has been downloaded (isDecompressorReady). The dictionary download is triggered
+      // asynchronously by DictionaryRetrievalService when the store metadata changes, so
+      // there is a window where routing data is present but the decompressor is not yet ready.
+      // Additionally, the thin client connects to a random router which may have a slightly
+      // different view than the routers checked above. Retrying handles all these edge cases.
+      TestUtils.waitForNonDeterministicAssertion(
+          STORE_VERSION_AVAILABILITY_TIMEOUT_SEC,
+          TimeUnit.SECONDS,
+          true,
+          true,
+          () -> {
+            dataValidator.validate(avroClient, vsonClient, metricsRepository);
+          });
     }
 
     return storeName;
@@ -1450,5 +1552,76 @@ public abstract class TestBatch {
           .getCurrentVersion(veniceCluster.getClusterName(), storeName);
       Assert.assertEquals(version, 2);
     });
+  }
+
+  /**
+   * End-to-end test to verify that a user-initiated push can kill an ongoing compliance push.
+   * This test:
+   * 1. Creates a store and does an initial push
+   * 2. Starts a compliance push using requestTopicForWrites (simulates compliance push in progress)
+   * 3. Runs a real VPJ user push which should kill the compliance push
+   * 4. Verifies the user push succeeds and creates the expected version
+   */
+  @Test(timeOut = TEST_TIMEOUT)
+  public void testUserPushKillsCompliancePushEndToEnd() throws Exception {
+    File inputDir = getTempDataDirectory();
+    String storeName = Utils.getUniqueString("compliance-push-kill-store");
+    String inputDirPath = "file://" + inputDir.getAbsolutePath();
+
+    // Write test data
+    writeSimpleAvroFileWithStringToStringSchema(inputDir);
+
+    // Create store and do initial push
+    Properties props = defaultVPJProps(veniceCluster, inputDirPath, storeName);
+    Schema keySchema = Schema.parse("\"string\"");
+    Schema valueSchema = Schema.parse("\"string\"");
+    createStoreForJob(veniceCluster, keySchema.toString(), valueSchema.toString(), props).close();
+
+    // Run initial push to create version 1
+    IntegrationTestPushUtils.runVPJ(props);
+
+    try (ControllerClient controllerClient =
+        new ControllerClient(veniceCluster.getClusterName(), veniceCluster.getAllControllersURLs())) {
+      // Verify version 1 is current
+      TestUtils.waitForNonDeterministicAssertion(10, TimeUnit.SECONDS, () -> {
+        int currentVersion = controllerClient.getStore(storeName).getStore().getCurrentVersion();
+        Assert.assertEquals(currentVersion, 1, "Initial push should create version 1");
+      });
+
+      // Start a compliance push (this simulates an ongoing compliance push)
+      String compliancePushId = Version.generateCompliancePushId("test-compliance-push-" + System.currentTimeMillis());
+      VersionCreationResponse compliancePushResponse = controllerClient.requestTopicForWrites(
+          storeName,
+          1000,
+          Version.PushType.BATCH,
+          compliancePushId,
+          true,
+          true,
+          false,
+          Optional.empty(),
+          Optional.empty(),
+          Optional.empty(),
+          false,
+          -1);
+      Assert.assertFalse(
+          compliancePushResponse.isError(),
+          "Compliance push should start successfully: " + compliancePushResponse.getError());
+      int compliancePushVersion = compliancePushResponse.getVersion();
+      Assert.assertEquals(compliancePushVersion, 2, "Compliance push should create version 2");
+
+      // Now run a user-initiated VPJ push - this should kill the compliance push
+      // Write new data for the user push
+      writeSimpleAvroFileWithStringToStringSchema2(inputDir);
+      Properties userPushProps = defaultVPJProps(veniceCluster, inputDirPath, storeName);
+
+      // Run the user push - this should succeed after killing the compliance push
+      IntegrationTestPushUtils.runVPJ(userPushProps);
+
+      // Verify the user push succeeded and created version 3 (compliance push v2 was killed)
+      TestUtils.waitForNonDeterministicAssertion(10, TimeUnit.SECONDS, () -> {
+        int currentVersion = controllerClient.getStore(storeName).getStore().getCurrentVersion();
+        Assert.assertEquals(currentVersion, 3, "User push should create version 3 after killing compliance push v2");
+      });
+    }
   }
 }

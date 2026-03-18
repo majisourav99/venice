@@ -23,6 +23,13 @@ import java.util.Map;
 
 
 public class HelixGroupStats extends AbstractVeniceStats {
+  /**
+   * Per-Helix-group OTel metric entity states and Tehuti metric references, keyed by group ID. Each map grows
+   * lazily via {@code computeIfAbsent} and is bounded by the number of Helix groups configured for the store
+   * (typically 3–5). Entries are not evicted — the maps persist for the lifetime of this stats instance.
+   * {@code groupResponseWaitingTimeAvgMap} holds Tehuti {@link io.tehuti.metrics.Metric} references; the
+   * remaining maps hold OTel {@link MetricEntityStateBase} instances.
+   */
   private final VeniceConcurrentHashMap<Integer, Metric> groupResponseWaitingTimeAvgMap =
       new VeniceConcurrentHashMap<>();
   private final VeniceConcurrentHashMap<Integer, MetricEntityStateBase> groupRequestCountMap =
@@ -193,18 +200,7 @@ public class HelixGroupStats extends AbstractVeniceStats {
    * Metric names for tehuti metrics used in this class.
    */
   public enum HelixGroupTehutiMetricName implements TehutiMetricNameEnum {
-    GROUP_COUNT, GROUP_REQUEST, GROUP_PENDING_REQUEST, GROUP_RESPONSE_WAITING_TIME;
-
-    private final String metricName;
-
-    HelixGroupTehutiMetricName() {
-      this.metricName = name().toLowerCase();
-    }
-
-    @Override
-    public String getMetricName() {
-      return this.metricName;
-    }
+    GROUP_COUNT, GROUP_REQUEST, GROUP_PENDING_REQUEST, GROUP_RESPONSE_WAITING_TIME
   }
 
   /**

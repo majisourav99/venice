@@ -21,7 +21,6 @@ import com.linkedin.venice.serialization.avro.OptimizedKafkaValueSerializer;
 import com.linkedin.venice.utils.VeniceProperties;
 import com.linkedin.venice.utils.concurrent.VeniceConcurrentHashMap;
 import com.linkedin.venice.utils.pools.LandFillObjectPool;
-import com.linkedin.venice.views.ChangeCaptureView;
 import io.tehuti.metrics.MetricsRepository;
 import java.util.Map;
 import java.util.Objects;
@@ -114,18 +113,6 @@ public class VeniceChangelogConsumerClientFactory {
       String viewClass = getViewClass(newStoreChangelogClientConfig, storeName);
       String consumerName =
           suffixConsumerIdToStore(storeName + "-" + viewClass.getClass().getSimpleName(), adjustedConsumerId);
-      if (viewClass.equals(ChangeCaptureView.class.getCanonicalName())) {
-        // TODO: This is a little bit of a hack. This is to deal with the an issue where the before image change
-        // capture topic doesn't follow the same naming convention as view topics.
-        newStoreChangelogClientConfig.setIsBeforeImageView(true);
-        return new VeniceChangelogConsumerImpl(
-            newStoreChangelogClientConfig,
-            consumer != null
-                ? consumer
-                : getPubSubConsumer(newStoreChangelogClientConfig, pubSubMessageDeserializer, consumerName),
-            pubSubMessageDeserializer,
-            this);
-      }
 
       if (globalChangelogClientConfig.isNewStatelessClientEnabled()) {
         return new VeniceChangelogConsumerDaVinciRecordTransformerImpl<K, V>(newStoreChangelogClientConfig, this);
@@ -178,29 +165,20 @@ public class VeniceChangelogConsumerClientFactory {
     return getStatefulChangelogConsumer(storeName, null, valueClass, null);
   }
 
-  public <K, V> VeniceChangelogConsumer<K, V> getVersionSpecificChangelogConsumer(
-      String storeName,
-      int storeVersion,
-      boolean includeControlMessages) {
-    return getVersionSpecificChangelogConsumer(storeName, storeVersion, includeControlMessages, false);
-  }
-
   /**
    * Subscribes to a specific version of a Venice store. This is only intended for internal use.
    */
   public <K, V> VeniceChangelogConsumer<K, V> getVersionSpecificChangelogConsumer(
       String storeName,
       int storeVersion,
-      boolean includeControlMessages,
-      boolean deserializeReplicationMetadata) {
+      boolean includeControlMessages) {
     String consumerName = storeName + "v_" + storeVersion;
     return versionSpecificStoreClientMap.computeIfAbsent(consumerName, name -> {
       ChangelogClientConfig newStoreChangelogClientConfig =
           getNewStoreChangelogClientConfig(storeName).setStoreVersion(storeVersion)
               .setIsStateful(false)
               .setConsumerName(consumerName)
-              .setIncludeControlMessages(includeControlMessages)
-              .setDeserializeReplicationMetadata(deserializeReplicationMetadata);
+              .setIncludeControlMessages(includeControlMessages);
 
       return new VeniceChangelogConsumerDaVinciRecordTransformerImpl<K, V>(newStoreChangelogClientConfig, this);
     });
@@ -210,7 +188,7 @@ public class VeniceChangelogConsumerClientFactory {
    * Creates a version specific changelog consumer without control messages.
    */
   public <K, V> VeniceChangelogConsumer<K, V> getVersionSpecificChangelogConsumer(String storeName, int storeVersion) {
-    return getVersionSpecificChangelogConsumer(storeName, storeVersion, false, false);
+    return getVersionSpecificChangelogConsumer(storeName, storeVersion, false);
   }
 
   private ChangelogClientConfig getNewStoreChangelogClientConfig(String storeName) {

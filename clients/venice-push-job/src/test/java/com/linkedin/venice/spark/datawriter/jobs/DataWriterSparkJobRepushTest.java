@@ -30,6 +30,7 @@ import org.apache.spark.api.java.function.MapPartitionsFunction;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
@@ -294,6 +295,128 @@ public class DataWriterSparkJobRepushTest {
   }
 
   /**
+   * Verify that per-record schema IDs from Kafka are preserved through the Spark pipeline
+   * and not replaced with the global -1 value.
+   */
+  @Test
+  public void testSchemaIdPreservedThroughPipeline() {
+    String testName = "testSchemaIdPreservedThroughPipeline";
+    TestSparkPartitionWriter.clearCapturedRecords(testName);
+
+    TestDataWriterSparkJobWithSchemaIds job = new TestDataWriterSparkJobWithSchemaIds(testName);
+    currentTestJob = job;
+
+    Properties props = createDefaultTestProperties();
+
+    PushJobSetting setting = new PushJobSetting();
+    setting.isSourceKafka = true;
+    setting.kafkaInputTopic = "test_store_v1";
+    setting.kafkaInputBrokerUrl = "localhost:9092";
+    setting.repushTTLEnabled = false;
+    setting.topic = "test_store_v1";
+    setting.kafkaUrl = "localhost:9092";
+    setting.partitionerClass = DefaultVenicePartitioner.class.getName();
+    setting.partitionCount = 1;
+    setting.sourceKafkaInputVersionInfo = new VersionImpl("test_store", 1, "test-push-id");
+
+    job.configure(new VeniceProperties(props), setting);
+    job.runComputeJob();
+
+    List<TestSparkPartitionWriter.TestRecord> capturedRecords = TestSparkPartitionWriter.getCapturedRecords(testName);
+    assertEquals(capturedRecords.size(), 2, "Should have captured 2 records");
+
+    // Verify per-record schema IDs are preserved (not -1)
+    TestSparkPartitionWriter.TestRecord record1 =
+        capturedRecords.stream().filter(r -> Arrays.equals(r.key, "key-a".getBytes())).findFirst().orElse(null);
+    assertNotNull(record1, "Should find key-a");
+    assertEquals(record1.valueSchemaId, 5, "Schema ID 5 should be preserved for key-a");
+    assertEquals(record1.rmdVersionId, 2, "RMD version ID 2 should be preserved for key-a");
+
+    TestSparkPartitionWriter.TestRecord record2 =
+        capturedRecords.stream().filter(r -> Arrays.equals(r.key, "key-b".getBytes())).findFirst().orElse(null);
+    assertNotNull(record2, "Should find key-b");
+    assertEquals(record2.valueSchemaId, 7, "Schema ID 7 should be preserved for key-b");
+    assertEquals(record2.rmdVersionId, 3, "RMD version ID 3 should be preserved for key-b");
+  }
+
+  /**
+   * Verify that SYSTEM_SCHEMA_READER_ENABLED is set in the Spark job config for KIF repush.
+   * Without this, the Spark path may fail to deserialize messages using newer KME versions.
+   */
+  @Test
+  public void testKifRepushSetsSystemSchemaReaderEnabled() {
+    String testName = "testKifRepushSetsSystemSchemaReaderEnabled";
+
+    TestDataWriterSparkJob job = new TestDataWriterSparkJob(testName);
+    currentTestJob = job;
+
+    Properties props = createDefaultTestProperties();
+
+    PushJobSetting setting = new PushJobSetting();
+    setting.isSourceKafka = true;
+    setting.kafkaInputTopic = "test_store_v1";
+    setting.kafkaInputBrokerUrl = "localhost:9092";
+    setting.repushTTLEnabled = false;
+    setting.topic = "test_store_v1";
+    setting.kafkaUrl = "localhost:9092";
+    setting.partitionerClass = DefaultVenicePartitioner.class.getName();
+    setting.partitionCount = 1;
+    setting.isSystemSchemaReaderEnabled = true;
+    setting.sourceKafkaInputVersionInfo = new VersionImpl("test_store", 1, "test-push-id");
+
+    job.configure(new VeniceProperties(props), setting);
+
+    String systemSchemaReaderEnabled = job.getSparkSession().conf().get("system.schema.reader.enabled");
+    assertEquals(systemSchemaReaderEnabled, "true", "SYSTEM_SCHEMA_READER_ENABLED must be set for KIF repush");
+  }
+
+  /**
+   * Verify that VALUE_SCHEMA_DIR is set in the Spark job config when TTL is enabled.
+   * This was a bug where only RMD_SCHEMA_DIR was set, causing VeniceRmdTTLFilter to crash
+   * at runtime because HDFSSchemaSource requires both VALUE_SCHEMA_DIR and RMD_SCHEMA_DIR.
+   */
+  @Test
+  public void testTTLRepushSetsValueSchemaDir() throws Exception {
+    String testName = "testTTLRepushSetsValueSchemaDir";
+
+    File valueSchemaTempDir = Files.createTempDirectory("value-schemas").toFile();
+    File rmdSchemaTempDir = Files.createTempDirectory("rmd-schemas").toFile();
+
+    try {
+      TestableDataWriterSparkJob job = new TestableDataWriterSparkJob(testName);
+      currentTestJob = job;
+
+      Properties props = createDefaultTestProperties();
+      props.setProperty("kafka.input.source.compression.strategy", "NO_OP");
+
+      PushJobSetting setting = new PushJobSetting();
+      setting.isSourceKafka = true;
+      setting.kafkaInputTopic = "test_store_v1";
+      setting.kafkaInputBrokerUrl = "localhost:9092";
+      setting.repushTTLEnabled = true;
+      setting.repushTTLStartTimeMs = System.currentTimeMillis();
+      setting.valueSchemaDir = valueSchemaTempDir.getAbsolutePath();
+      setting.rmdSchemaDir = rmdSchemaTempDir.getAbsolutePath();
+      setting.topic = "test_store_v1";
+      setting.kafkaUrl = "localhost:9092";
+      setting.partitionerClass = DefaultVenicePartitioner.class.getName();
+      setting.partitionCount = 1;
+      setting.sourceKafkaInputVersionInfo = new VersionImpl("test_store", 1, "test-push-id");
+
+      job.configure(new VeniceProperties(props), setting);
+
+      // Verify both schema dirs are set in the Spark session config
+      String valueSchemaDir = job.getSparkSession().conf().get("value.schema.dir");
+      String rmdSchemaDir = job.getSparkSession().conf().get("rmd.schema.dir");
+      assertEquals(valueSchemaDir, valueSchemaTempDir.getAbsolutePath(), "VALUE_SCHEMA_DIR must be set for TTL repush");
+      assertEquals(rmdSchemaDir, rmdSchemaTempDir.getAbsolutePath(), "RMD_SCHEMA_DIR must be set for TTL repush");
+    } finally {
+      deleteDirectory(valueSchemaTempDir);
+      deleteDirectory(rmdSchemaTempDir);
+    }
+  }
+
+  /**
    * Test compression re-encoding in the Spark pipeline.
    * Source: GZIP, Target: NO_OP
    */
@@ -330,6 +453,93 @@ public class DataWriterSparkJobRepushTest {
     assertEquals(capturedRecords.size(), 1);
 
     assertEquals(new String(capturedRecords.get(0).value), originalValue);
+  }
+
+  /**
+   * Test that VALUE_SCHEMA_ID_PROP is set to the actual value schema ID (not -1) for KIF repush.
+   */
+  @Test
+  public void testKifRepushSetsValueSchemaIdFromPushJobSetting() {
+    String testName = "testKifRepushSetsValueSchemaIdFromPushJobSetting";
+
+    TestDataWriterSparkJob job = new TestDataWriterSparkJob(testName);
+    currentTestJob = job;
+
+    Properties props = createDefaultTestProperties();
+
+    PushJobSetting setting = new PushJobSetting();
+    setting.isSourceKafka = true;
+    setting.kafkaInputTopic = "test_store_v1";
+    setting.kafkaInputBrokerUrl = "localhost:9092";
+    setting.repushTTLEnabled = false;
+    setting.topic = "test_store_v1";
+    setting.kafkaUrl = "localhost:9092";
+    setting.partitionerClass = DefaultVenicePartitioner.class.getName();
+    setting.partitionCount = 1;
+    setting.valueSchemaId = 3; // Simulates schema ID retrieved from controller
+    setting.sourceKafkaInputVersionInfo = new VersionImpl("test_store", 1, "test-push-id");
+
+    job.configure(new VeniceProperties(props), setting);
+
+    // Verify VALUE_SCHEMA_ID_PROP is set to the actual schema ID, not -1
+    String valueSchemaIdStr = job.getSparkSession().conf().get("value.schema.id");
+    assertEquals(
+        valueSchemaIdStr,
+        "3",
+        "VALUE_SCHEMA_ID_PROP should be set to pushJobSetting.valueSchemaId for KIF repush");
+  }
+
+  /**
+   * Verify that all job properties (including xc.*, pubsub.*, etc.) are forwarded to the
+   * DataFrameReader, matching MR behavior where KafkaInputUtils.getConsumerProperties() copies
+   * ALL JobConf properties to the PubSub consumer.
+   */
+  @Test
+  public void testJobPropertiesForwardedToDataFrameReader() {
+    String testName = "testJobPropertiesForwardedToDataFrameReader";
+
+    // Uses ConfigTestSparkJob pattern: calls super.getKafkaInputDataFrame() which runs
+    // the real production code (including the bulk forwarding loop), catches the expected
+    // Kafka connection failure, and returns mock data. This ensures the test exercises
+    // the actual DataWriterSparkJob.getKafkaInputDataFrame() method.
+    ConfigTestSparkJob job = new ConfigTestSparkJob();
+    currentTestJob = job;
+
+    Properties props = createDefaultTestProperties();
+    // Simulate xc.* cross-colo TLS properties that come from the DAG config
+    props.setProperty("xc.tls.key.store.type", "PKCS12");
+    props.setProperty("xc.pubsub.broker.url.to.region.name.map", "broker1@region1,broker2@region2");
+    // Simulate pubsub.* properties
+    props.setProperty("pubsub.some.client.config", "test-value");
+    // Dynamic pass-through prefix list (same as production voldemort-build-and-push config)
+    props.setProperty("pass.through.config.prefixes.list", "pubsub.,xc.");
+
+    PushJobSetting setting = new PushJobSetting();
+    setting.isSourceKafka = true;
+    setting.kafkaInputTopic = "test_store_v1";
+    setting.kafkaInputBrokerUrl = "localhost:9092";
+    setting.repushTTLEnabled = false;
+    setting.topic = "test_store_v1";
+    setting.kafkaUrl = "localhost:9092";
+    setting.partitionerClass = DefaultVenicePartitioner.class.getName();
+    setting.partitionCount = 1;
+    setting.sourceKafkaInputVersionInfo = new VersionImpl("test_store", 1, "test-push-id");
+
+    job.configure(new VeniceProperties(props), setting);
+    job.getKafkaInputDataFrame();
+
+    SparkSession spark = job.getSparkSession();
+    assertEquals(spark.conf().get("xc.tls.key.store.type"), "PKCS12", "xc.tls.* should be forwarded");
+    assertEquals(
+        spark.conf().get("xc.pubsub.broker.url.to.region.name.map"),
+        "broker1@region1,broker2@region2",
+        "xc.pubsub.* should be forwarded");
+    assertEquals(spark.conf().get("pubsub.some.client.config"), "test-value", "pubsub.* should be forwarded");
+    assertEquals(spark.conf().get("kafka.input.topic"), "test_store_v1", "kafka.input.topic should be forwarded");
+    assertEquals(
+        spark.conf().get("kafka.input.broker.url"),
+        "localhost:9092",
+        "kafka.input.broker.url should be forwarded");
   }
 
   private Properties createDefaultTestProperties() {
@@ -450,6 +660,30 @@ public class DataWriterSparkJobRepushTest {
   }
 
   /**
+   * Test job that provides input data with distinct per-record schema IDs to verify propagation.
+   */
+  private class TestDataWriterSparkJobWithSchemaIds extends TestDataWriterSparkJob {
+    TestDataWriterSparkJobWithSchemaIds(String testName) {
+      super(testName);
+    }
+
+    @Override
+    protected Dataset<Row> getKafkaInputDataFrame() {
+      // Create rows with distinct schema IDs (column index 4) and RMD version IDs (column index 7)
+      List<Row> mockRows = Arrays.asList(
+          new GenericRowWithSchema(
+              new Object[] { "region1", 0, 1L, MessageType.PUT.getValue(), 5, "key-a".getBytes(), "val-a".getBytes(), 2,
+                  "rmd".getBytes(), null },
+              RAW_PUBSUB_INPUT_TABLE_SCHEMA),
+          new GenericRowWithSchema(
+              new Object[] { "region1", 0, 2L, MessageType.PUT.getValue(), 7, "key-b".getBytes(), "val-b".getBytes(), 3,
+                  "rmd".getBytes(), null },
+              RAW_PUBSUB_INPUT_TABLE_SCHEMA));
+      return getSparkSession().createDataFrame(mockRows, RAW_PUBSUB_INPUT_TABLE_SCHEMA);
+    }
+  }
+
+  /**
    * Testable subclass that exposes applyTTLFilter for direct testing.
    */
   private class TestableDataWriterSparkJob extends TestDataWriterSparkJob {
@@ -490,6 +724,21 @@ public class DataWriterSparkJobRepushTest {
           createPutRow("key3", "value3", 400L));
 
       return getSparkSession().createDataFrame(testData, RAW_PUBSUB_INPUT_TABLE_SCHEMA);
+    }
+  }
+
+  private static class ConfigTestSparkJob extends DataWriterSparkJob {
+    @Override
+    public Dataset<Row> getKafkaInputDataFrame() {
+      try {
+        return super.getKafkaInputDataFrame();
+      } catch (Exception e) {
+        List<Row> emptyRows = Arrays.asList(
+            new GenericRowWithSchema(
+                new Object[] { "region1", 0, 0L, 0, 1, new byte[0], new byte[0], 0, new byte[0], null },
+                RAW_PUBSUB_INPUT_TABLE_SCHEMA));
+        return getSparkSession().createDataFrame(emptyRows, RAW_PUBSUB_INPUT_TABLE_SCHEMA);
+      }
     }
   }
 

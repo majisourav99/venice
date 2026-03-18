@@ -15,6 +15,7 @@ import com.linkedin.venice.offsets.OffsetRecord;
 import com.linkedin.venice.serialization.avro.AvroProtocolDefinition;
 import com.linkedin.venice.serialization.avro.InternalAvroSpecificSerializer;
 import com.linkedin.venice.utils.DaemonThreadFactory;
+import com.linkedin.venice.utils.LogContext;
 import com.linkedin.venice.utils.SparseConcurrentList;
 import com.linkedin.venice.utils.Utils;
 import com.linkedin.venice.utils.concurrent.VeniceConcurrentHashMap;
@@ -76,7 +77,8 @@ public class BlobSnapshotManager {
       StorageMetadataService storageMetadataService,
       int snapshotRetentionTimeInMin,
       BlobTransferUtils.BlobTransferTableFormat transferTableFormat,
-      int snapshotCleanupIntervalInMins) {
+      int snapshotCleanupIntervalInMins,
+      LogContext logContext) {
     this.storageEngineRepository = storageEngineRepository;
     this.storageMetadataService = storageMetadataService;
     this.snapshotRetentionTimeInMillis = TimeUnit.MINUTES.toMillis(snapshotRetentionTimeInMin);
@@ -89,8 +91,8 @@ public class BlobSnapshotManager {
 
     this.snapshotAccessLocks = new VeniceConcurrentHashMap<>();
 
-    this.snapshotCleanupScheduler = Executors
-        .newSingleThreadScheduledExecutor(new DaemonThreadFactory("Venice-BlobTransfer-Snapshot-Cleanup-Scheduler"));
+    this.snapshotCleanupScheduler = Executors.newSingleThreadScheduledExecutor(
+        new DaemonThreadFactory("Venice-BlobTransfer-Snapshot-Cleanup-Scheduler", logContext));
 
     scheduleCleanupOutOfRetentionSnapshotTask();
   }
@@ -108,7 +110,8 @@ public class BlobSnapshotManager {
         storageMetadataService,
         DEFAULT_SNAPSHOT_RETENTION_TIME_IN_MIN,
         BlobTransferUtils.BlobTransferTableFormat.BLOCK_BASED_TABLE,
-        DEFAULT_SNAPSHOT_CLEANUP_INTERVAL_IN_MINS);
+        DEFAULT_SNAPSHOT_CLEANUP_INTERVAL_IN_MINS,
+        LogContext.forTests("BlobSnapshotManager"));
   }
 
   /**
@@ -206,10 +209,11 @@ public class BlobSnapshotManager {
       snapshotTimestamps.get(topicName).put(partitionId, System.currentTimeMillis());
       // update the snapshot offset record to reflect the latest snapshot offset
       snapshotMetadataRecords.get(topicName).put(partitionId, metadataBeforeRecreateSnapshot);
-      LOGGER.info("Successfully recreated snapshot for topic {} partition {}. ", topicName, partitionId);
+      LOGGER
+          .info("Successfully recreated snapshot for topic-partition: {}.", Utils.getReplicaId(topicName, partitionId));
     } catch (Exception e) {
       String errorMessage =
-          String.format("Failed to create snapshot for topic %s partition %d", topicName, partitionId);
+          "Failed to create snapshot for topic-partition: " + Utils.getReplicaId(topicName, partitionId);
       LOGGER.error(errorMessage, e);
       throw new VeniceException(errorMessage);
     }
@@ -251,19 +255,21 @@ public class BlobSnapshotManager {
 
     AtomicInteger concurrentUsers = concurrentPartitionUsers.get(partitionId);
     if (concurrentUsers == null) {
-      throw new VeniceException(String.format("%d partition not found on topic %s", partitionId, topicName));
+      throw new VeniceException("Topic-partition " + Utils.getReplicaId(topicName, partitionId) + " not found");
     }
     long result = concurrentUsers.decrementAndGet();
     if (result < 0) {
       LOGGER.warn(
-          "Concurrent user count for topic {} partition {} is negative: {}. This should not happen, but resetting to 0. ",
-          topicName,
-          partitionId,
+          "Concurrent user count for topic-partition: {} is negative: {}. This should not happen, but resetting to 0.",
+          Utils.getReplicaId(topicName, partitionId),
           result);
       concurrentUsers.set(0);
     }
 
-    LOGGER.info("Concurrent user count for topic {} partition {} decreased to {}", topicName, partitionId, result);
+    LOGGER.info(
+        "Concurrent user count for topic-partition: {} decreased to {}",
+        Utils.getReplicaId(topicName, partitionId),
+        Math.max(result, 0));
   }
 
   protected int getConcurrentSnapshotUsers(String topicName, int partitionId) {
@@ -434,22 +440,23 @@ public class BlobSnapshotManager {
         return;
       }
 
-      LOGGER.info("Cleaning up stale snapshot for topic {} partition {}", topicName, partitionId);
+      LOGGER.info("Cleaning up stale snapshot for topic-partition: {}", Utils.getReplicaId(topicName, partitionId));
 
       try {
         cleanupSnapshot(topicName, partitionId);
       } catch (PersistenceFailureException e) {
         LOGGER.warn(
-            "Failed to clean up snapshot for topic {} partition {} due to partition no longer exists, only removing from tracking.",
-            topicName,
-            partitionId);
+            "Failed to clean up snapshot for topic-partition: {} due to partition no longer exists, only removing from tracking.",
+            Utils.getReplicaId(topicName, partitionId));
       }
 
       removeTrackingValues(topicName, partitionId);
 
-      LOGGER.info("Successfully cleaned up snapshot for topic {} partition {}", topicName, partitionId);
+      LOGGER
+          .info("Successfully cleaned up snapshot for topic-partition: {}", Utils.getReplicaId(topicName, partitionId));
     } catch (Exception e) {
-      LOGGER.error("Failed to clean up snapshot for topic {} partition {}", topicName, partitionId, e);
+      LOGGER
+          .error("Failed to clean up snapshot for topic-partition: {}", Utils.getReplicaId(topicName, partitionId), e);
     }
   }
 
@@ -482,7 +489,10 @@ public class BlobSnapshotManager {
               try {
                 cleanupOutOfRetentionSnapshot(topicName, partitionId);
               } catch (Exception e) {
-                LOGGER.error("Error during scheduled cleanup for topic {} partition {}", topicName, partitionId, e);
+                LOGGER.error(
+                    "Error during scheduled cleanup for topic-partition: {}",
+                    Utils.getReplicaId(topicName, partitionId),
+                    e);
               }
             }
           }

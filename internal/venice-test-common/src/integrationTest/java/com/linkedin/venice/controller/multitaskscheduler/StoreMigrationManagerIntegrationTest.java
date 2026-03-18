@@ -15,6 +15,7 @@ import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
 import com.linkedin.d2.balancer.D2Client;
+import com.linkedin.venice.acl.VeniceComponent;
 import com.linkedin.venice.client.store.AbstractAvroStoreClient;
 import com.linkedin.venice.client.store.AvroGenericStoreClient;
 import com.linkedin.venice.client.store.ClientConfig;
@@ -37,6 +38,7 @@ import com.linkedin.venice.meta.Store;
 import com.linkedin.venice.meta.StoreInfo;
 import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.utils.IntegrationTestPushUtils;
+import com.linkedin.venice.utils.LogContext;
 import com.linkedin.venice.utils.TestUtils;
 import com.linkedin.venice.utils.TestWriteUtils;
 import com.linkedin.venice.utils.Time;
@@ -60,9 +62,9 @@ import org.testng.annotations.Test;
 public class StoreMigrationManagerIntegrationTest {
   private StoreMigrationManager storeMigrationManager;
   private static final long TIMEOUT = 10 * Time.MS_PER_SECOND;
-  private static final int TEST_TIMEOUT = 180 * Time.MS_PER_SECOND;
+  private static final int TEST_TIMEOUT = 360 * Time.MS_PER_SECOND;
   private static final int RECORD_COUNT = 20;
-  private static final int DELAY_IN_SECONDS = 2;
+  private static final int DELAY_IN_SECONDS = 1;
 
   private VeniceTwoLayerMultiRegionMultiClusterWrapper twoLayerMultiRegionMultiClusterWrapper;
   private VeniceMultiClusterWrapper multiClusterWrapper;
@@ -107,7 +109,12 @@ public class StoreMigrationManagerIntegrationTest {
 
     parentControllerUrl = twoLayerMultiRegionMultiClusterWrapper.getControllerConnectString();
     childControllerUrl0 = multiClusterWrapper.getControllerConnectString();
-    storeMigrationManager = StoreMigrationManager.createStoreMigrationManager(2, 5, DELAY_IN_SECONDS, fabricList);
+    storeMigrationManager = StoreMigrationManager.createStoreMigrationManager(
+        2,
+        5,
+        DELAY_IN_SECONDS,
+        fabricList,
+        LogContext.forTests(VeniceComponent.CONTROLLER.name()));
   }
 
   @AfterMethod

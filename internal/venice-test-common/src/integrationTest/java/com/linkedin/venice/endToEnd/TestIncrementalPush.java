@@ -12,16 +12,12 @@ import static com.linkedin.venice.vpj.VenicePushJobConstants.DATA_WRITER_COMPUTE
 import static com.linkedin.venice.vpj.VenicePushJobConstants.DEFAULT_KEY_FIELD_PROP;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.ENABLE_WRITE_COMPUTE;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.INCREMENTAL_PUSH;
+import static com.linkedin.venice.vpj.VenicePushJobConstants.INCREMENTAL_PUSH_WRITE_QUOTA_RECORDS_PER_SECOND;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.SPARK_NATIVE_INPUT_FORMAT_ENABLED;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotNull;
 
-import com.linkedin.d2.balancer.D2Client;
-import com.linkedin.d2.balancer.D2ClientBuilder;
-import com.linkedin.davinci.kafka.consumer.KafkaConsumerServiceDelegator;
-import com.linkedin.venice.ConfigKeys;
-import com.linkedin.venice.D2.D2ClientUtils;
 import com.linkedin.venice.client.store.AvroGenericStoreClient;
 import com.linkedin.venice.client.store.ClientConfig;
 import com.linkedin.venice.client.store.ClientFactory;
@@ -32,13 +28,9 @@ import com.linkedin.venice.controllerapi.NewStoreResponse;
 import com.linkedin.venice.controllerapi.UpdateStoreQueryParams;
 import com.linkedin.venice.controllerapi.VersionCreationResponse;
 import com.linkedin.venice.exceptions.VeniceException;
-import com.linkedin.venice.integration.utils.ServiceFactory;
+import com.linkedin.venice.hadoop.VenicePushJob;
 import com.linkedin.venice.integration.utils.VeniceClusterWrapper;
-import com.linkedin.venice.integration.utils.VeniceControllerWrapper;
-import com.linkedin.venice.integration.utils.VeniceMultiClusterWrapper;
-import com.linkedin.venice.integration.utils.VeniceMultiRegionClusterCreateOptions;
 import com.linkedin.venice.integration.utils.VeniceServerWrapper;
-import com.linkedin.venice.integration.utils.VeniceTwoLayerMultiRegionMultiClusterWrapper;
 import com.linkedin.venice.meta.BackupStrategy;
 import com.linkedin.venice.meta.Store;
 import com.linkedin.venice.meta.Version;
@@ -52,7 +44,6 @@ import com.linkedin.venice.utils.TestWriteUtils;
 import com.linkedin.venice.utils.Utils;
 import java.io.File;
 import java.io.IOException;
-import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
@@ -60,65 +51,16 @@ import java.util.concurrent.TimeUnit;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.testng.Assert;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 
-public class TestIncrementalPush {
-  private static final int NUMBER_OF_CHILD_DATACENTERS = 2;
-  private static final int NUMBER_OF_CLUSTERS = 1;
+public class TestIncrementalPush extends AbstractMultiRegionTest {
   private static final int TEST_TIMEOUT_MS = 180_000;
-
-  private static final int REPLICATION_FACTOR = 2;
-  private static final String CLUSTER_NAME = "venice-cluster0";
-
-  private VeniceTwoLayerMultiRegionMultiClusterWrapper multiRegionMultiClusterWrapper;
-  private VeniceControllerWrapper parentController;
-  private List<VeniceMultiClusterWrapper> childDatacenters;
-  private D2Client d2ClientDC0;
-
-  @BeforeClass(alwaysRun = true)
-  public void setUp() {
-    Properties serverProperties = new Properties();
-    serverProperties.put(ConfigKeys.SERVER_RESUBSCRIPTION_TRIGGERED_BY_VERSION_INGESTION_CONTEXT_CHANGE_ENABLED, true);
-    serverProperties.put(
-        ConfigKeys.SERVER_CONSUMER_POOL_ALLOCATION_STRATEGY,
-        KafkaConsumerServiceDelegator.ConsumerPoolStrategyType.CURRENT_VERSION_PRIORITIZATION.name());
-    Properties controllerProps = new Properties();
-    controllerProps.put(ConfigKeys.CONTROLLER_AUTO_MATERIALIZE_META_SYSTEM_STORE, true);
-    VeniceMultiRegionClusterCreateOptions.Builder optionsBuilder =
-        new VeniceMultiRegionClusterCreateOptions.Builder().numberOfRegions(NUMBER_OF_CHILD_DATACENTERS)
-            .numberOfClusters(NUMBER_OF_CLUSTERS)
-            .numberOfParentControllers(1)
-            .numberOfChildControllers(1)
-            .numberOfServers(2)
-            .numberOfRouters(1)
-            .replicationFactor(REPLICATION_FACTOR)
-            .forkServer(false)
-            .parentControllerProperties(controllerProps)
-            .childControllerProperties(controllerProps)
-            .serverProperties(serverProperties);
-    this.multiRegionMultiClusterWrapper =
-        ServiceFactory.getVeniceTwoLayerMultiRegionMultiClusterWrapper(optionsBuilder.build());
-    this.childDatacenters = multiRegionMultiClusterWrapper.getChildRegions();
-    List<VeniceControllerWrapper> parentControllers = multiRegionMultiClusterWrapper.getParentControllers();
-    if (parentControllers.size() != 1) {
-      throw new IllegalStateException("Expect only one parent controller. Got: " + parentControllers.size());
-    }
-    this.parentController = parentControllers.get(0);
-    this.d2ClientDC0 = new D2ClientBuilder()
-        .setZkHosts(multiRegionMultiClusterWrapper.getChildRegions().get(0).getZkServerWrapper().getAddress())
-        .setZkSessionTimeout(3, TimeUnit.SECONDS)
-        .setZkStartupTimeout(3, TimeUnit.SECONDS)
-        .build();
-    D2ClientUtils.startClient(d2ClientDC0);
-  }
 
   @Test(timeOut = TEST_TIMEOUT_MS, dataProvider = "True-and-False", dataProviderClass = DataProviderUtils.class)
   public void testIncrementalPushPartialUpdateNewFormat(boolean useSparkCompute) throws IOException {
     final String storeName = Utils.getUniqueString("inc_push_update_new_format");
-    String parentControllerUrl = parentController.getControllerUrl();
+    String parentControllerUrl = getParentControllerUrl();
     File inputDir = getTempDataDirectory();
     Schema recordSchema = writeSimpleAvroFileWithStringToNameRecordV1Schema(inputDir);
     String keySchemaStr = recordSchema.getField(DEFAULT_KEY_FIELD_PROP).schema().toString();
@@ -189,7 +131,7 @@ public class TestIncrementalPush {
   @Test(timeOut = TEST_TIMEOUT_MS)
   public void testIncrementalPushPartialUpdateClassicFormat() throws IOException {
     final String storeName = Utils.getUniqueString("inc_push_update_classic_format");
-    String parentControllerUrl = parentController.getControllerUrl();
+    String parentControllerUrl = getParentControllerUrl();
     File inputDir = getTempDataDirectory();
     Schema recordSchema = writeSimpleAvroFileWithStringToPartialUpdateOpRecordSchema(inputDir);
     String keySchemaStr = recordSchema.getField(DEFAULT_KEY_FIELD_PROP).schema().toString();
@@ -411,10 +353,90 @@ public class TestIncrementalPush {
     }
   }
 
-  @AfterClass(alwaysRun = true)
-  public void cleanUp() {
-    D2ClientUtils.shutdownClient(d2ClientDC0);
-    Utils.closeQuietlyWithErrorLogged(multiRegionMultiClusterWrapper);
+  /**
+   * Test that incremental push throttling is applied when writing to the regular RT topic
+   * and that the push completes successfully with throttling enabled.
+   */
+  @Test(timeOut = TEST_TIMEOUT_MS)
+  public void testIncrementalPushWithThrottling() throws IOException {
+    final String storeName = Utils.getUniqueString("inc_push_throttle");
+    String parentControllerUrl = parentController.getControllerUrl();
+    int recordCount = 5;
+    File inputDir = getTempDataDirectory();
+    Schema recordSchema = writeSimpleAvroFileWithStringToNameRecordV1Schema(inputDir, recordCount);
+    String keySchemaStr = recordSchema.getField(DEFAULT_KEY_FIELD_PROP).schema().toString();
+    String inputDirPath = "file://" + inputDir.getAbsolutePath();
+
+    try (ControllerClient parentControllerClient = new ControllerClient(CLUSTER_NAME, parentControllerUrl)) {
+      assertCommand(
+          parentControllerClient
+              .createNewStore(storeName, "test_owner", keySchemaStr, NAME_RECORD_V2_SCHEMA.toString()));
+      UpdateStoreQueryParams updateStoreParams =
+          new UpdateStoreQueryParams().setStorageQuotaInByte(Store.UNLIMITED_STORAGE_QUOTA)
+              .setCompressionStrategy(CompressionStrategy.NO_OP)
+              .setActiveActiveReplicationEnabled(true)
+              .setWriteComputationEnabled(true)
+              .setChunkingEnabled(true)
+              .setIncrementalPushEnabled(true)
+              .setHybridRewindSeconds(10L)
+              .setHybridOffsetLagThreshold(2L);
+      ControllerResponse updateStoreResponse =
+          parentControllerClient.retryableRequest(5, c -> c.updateStore(storeName, updateStoreParams));
+      assertFalse(updateStoreResponse.isError(), "Update store got error: " + updateStoreResponse.getError());
+
+      VersionCreationResponse response = parentControllerClient.emptyPush(storeName, "test_push_id", 1000);
+      assertEquals(response.getVersion(), 1);
+      assertFalse(response.isError(), "Empty push to parent colo should succeed");
+      TestUtils.waitForNonDeterministicPushCompletion(
+          response.getKafkaTopic(),
+          parentControllerClient,
+          30,
+          TimeUnit.SECONDS);
+
+      // Run incremental push with throttling enabled (writing to regular RT topic).
+      // Quota of 1 rec/s ensures the throttler blocks ~1s between each record.
+      Properties vpjProperties =
+          IntegrationTestPushUtils.defaultVPJProps(multiRegionMultiClusterWrapper, inputDirPath, storeName);
+      vpjProperties.put(ENABLE_WRITE_COMPUTE, true);
+      vpjProperties.put(INCREMENTAL_PUSH, true);
+      vpjProperties.put(INCREMENTAL_PUSH_WRITE_QUOTA_RECORDS_PER_SECOND, 1);
+
+      String childControllerUrl = childDatacenters.get(0).getRandomController().getControllerUrl();
+      try (ControllerClient childControllerClient = new ControllerClient(CLUSTER_NAME, childControllerUrl)) {
+        String jobName = Utils.getUniqueString("venice-push-job-throttle-rt");
+        try (VenicePushJob vpj = new VenicePushJob(jobName, vpjProperties)) {
+          vpj.run();
+          Assert.assertTrue(
+              vpj.getIncrementalPushThrottledTimeMs() > 0,
+              "Incremental push throttle time should be positive when quota is 1 rec/s");
+        }
+        TestUtils.waitForNonDeterministicCompletion(
+            5,
+            TimeUnit.SECONDS,
+            () -> childControllerClient.getStore(storeName).getStore().getCurrentVersion() == 1);
+      }
+
+      VeniceClusterWrapper veniceClusterWrapper = childDatacenters.get(0).getClusters().get(CLUSTER_NAME);
+      veniceClusterWrapper.waitVersion(storeName, 1);
+
+      // Verify data was written correctly despite throttling
+      try (AvroGenericStoreClient<Object, Object> storeReader = ClientFactory.getAndStartGenericAvroClient(
+          ClientConfig.defaultGenericClientConfig(storeName).setVeniceURL(veniceClusterWrapper.getRandomRouterURL()))) {
+        TestUtils.waitForNonDeterministicAssertion(10, TimeUnit.SECONDS, true, () -> {
+          try {
+            for (int i = 1; i <= recordCount; i++) {
+              String key = String.valueOf(i);
+              GenericRecord value = readValue(storeReader, key);
+              assertNotNull(value, "Key " + key + " should not be missing!");
+              assertEquals(value.get("firstName").toString(), "first_name_" + key);
+              assertEquals(value.get("lastName").toString(), "last_name_" + key);
+            }
+          } catch (Exception e) {
+            throw new VeniceException(e);
+          }
+        });
+      }
+    }
   }
 
   private GenericRecord readValue(AvroGenericStoreClient<Object, Object> storeReader, String key)

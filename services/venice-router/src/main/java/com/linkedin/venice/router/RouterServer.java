@@ -21,6 +21,7 @@ import com.linkedin.venice.ConfigKeys;
 import com.linkedin.venice.acl.DynamicAccessController;
 import com.linkedin.venice.authorization.IdentityParser;
 import com.linkedin.venice.compression.CompressorFactory;
+import com.linkedin.venice.d2.D2ConfigUtils;
 import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.helix.HelixAdapterSerializer;
 import com.linkedin.venice.helix.HelixBaseRoutingRepository;
@@ -83,6 +84,7 @@ import com.linkedin.venice.router.throttle.RouterThrottler;
 import com.linkedin.venice.security.SSLFactory;
 import com.linkedin.venice.service.AbstractVeniceService;
 import com.linkedin.venice.servicediscovery.ServiceDiscoveryAnnouncer;
+import com.linkedin.venice.stats.ThreadPoolOtelMetricEntity;
 import com.linkedin.venice.stats.ThreadPoolStats;
 import com.linkedin.venice.stats.VeniceJVMStats;
 import com.linkedin.venice.stats.VeniceMetricsRepository;
@@ -115,6 +117,7 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -201,8 +204,18 @@ public class RouterServer extends AbstractVeniceService {
 
   public static final String ROUTER_SERVICE_NAME = "venice-router";
   public static final String ROUTER_SERVICE_METRIC_PREFIX = "router";
+
+  /**
+   * Returns the enum classes that compose {@link #ROUTER_SERVICE_METRIC_ENTITIES}. This is the
+   * single source of truth used by both production aggregation and tests.
+   */
+  public static List<Class<? extends ModuleMetricEntityInterface>> getMetricEntityEnumClasses() {
+    return Arrays.asList(RouterMetricEntity.class, ThreadPoolOtelMetricEntity.class);
+  }
+
   public static final Collection<MetricEntity> ROUTER_SERVICE_METRIC_ENTITIES =
-      ModuleMetricEntityInterface.getUniqueMetricEntities(RouterMetricEntity.class);
+      ModuleMetricEntityInterface.getUniqueMetricEntities(getMetricEntityEnumClasses());
+
   /**
    * Thread number used to monitor the listening port;
    */
@@ -212,6 +225,8 @@ public class RouterServer extends AbstractVeniceService {
   private final AggHostHealthStats aggHostHealthStats;
 
   private ScheduledExecutorService retryManagerExecutorService;
+  private ThreadPoolExecutor responseAggregationExecutor;
+  private ThreadPoolExecutor dnsResolveExecutor;
 
   private InFlightRequestStat inFlightRequestStat;
 
@@ -249,7 +264,32 @@ public class RouterServer extends AbstractVeniceService {
       sslFactory = Optional.empty();
     }
 
-    RouterServer server = new RouterServer(props, new ArrayList<>(), Optional.empty(), sslFactory);
+    List<ServiceDiscoveryAnnouncer> d2Servers = new ArrayList<>();
+
+    if (props.getBoolean("router.d2.announce.enabled", false)) {
+      String zkAddress = props.getString(ConfigKeys.ZOOKEEPER_ADDRESS);
+      String announceHost = props.getString("router.d2.announce.host", "localhost");
+      int port = props.getInt(ConfigKeys.LISTENER_PORT);
+      String localUri = "http://" + announceHost + ":" + port;
+      Map<String, String> clusterToD2 = props.getMap(ConfigKeys.CLUSTER_TO_D2);
+
+      for (Map.Entry<String, String> entry: clusterToD2.entrySet()) {
+        String d2ServiceName = entry.getValue();
+        String d2ClusterName = d2ServiceName + "_d2_cluster";
+        D2ConfigUtils.setupD2Config(zkAddress, false, d2ClusterName, d2ServiceName);
+        d2Servers.addAll(D2ConfigUtils.getD2Servers(zkAddress, d2ClusterName, localUri));
+      }
+
+      // Always announce the global cluster discovery service (separate from per-cluster D2)
+      String discoveryServiceName = DEFAULT_CLUSTER_DISCOVERY_D2_SERVICE_NAME;
+      String discoveryClusterName = discoveryServiceName + "_d2_cluster";
+      D2ConfigUtils.setupD2Config(zkAddress, false, discoveryClusterName, discoveryServiceName);
+      d2Servers.addAll(D2ConfigUtils.getD2Servers(zkAddress, discoveryClusterName, localUri));
+
+      LOGGER.info("D2 announcement enabled with {} announcers for router URI: {}", d2Servers.size(), localUri);
+    }
+
+    RouterServer server = new RouterServer(props, d2Servers, Optional.empty(), sslFactory);
     server.start();
 
     Runtime.getRuntime().addShutdownHook(new Thread() {
@@ -534,8 +574,13 @@ public class RouterServer extends AbstractVeniceService {
         new VeniceDelegateMode(config, routerStats, routeHttpRequestStats, dispatcher.getPerRouteStatsByType());
 
     if (config.isRouterHeartBeatEnabled()) {
-      heartbeat =
-          new RouterHeartbeat(liveInstanceMonitor, healthMonitor, config, sslFactoryForRequests, storageNodeClient);
+      heartbeat = new RouterHeartbeat(
+          liveInstanceMonitor,
+          healthMonitor,
+          config,
+          sslFactoryForRequests,
+          storageNodeClient,
+          config.getLogContext());
       heartbeat.startInner();
     }
 
@@ -555,7 +600,8 @@ public class RouterServer extends AbstractVeniceService {
         sslFactoryForRequests,
         metadataRepository,
         storageNodeClient,
-        compressorFactory);
+        compressorFactory,
+        metricsRepository);
 
     VeniceHostFinder hostFinder = new VeniceHostFinder(routingDataRepository, routerStats, healthMonitor);
 
@@ -612,6 +658,26 @@ public class RouterServer extends AbstractVeniceService {
      * No need to setup {@link com.linkedin.alpini.router.api.HostHealthMonitor} here since
      * {@link VeniceHostFinder} will always do health check.
      */
+    // Create dedicated thread pool for response aggregation if enabled (size > 0), to move work off the Netty EventLoop
+    // (stageExecutor(ctx)) and isolate it from slow client I/O.
+    int responseAggregationThreadPoolSize = config.getResponseAggregationThreadPoolSize();
+    if (responseAggregationThreadPoolSize > 0) {
+      int responseAggregationQueueCapacity = config.getResponseAggregationQueueCapacity();
+      this.responseAggregationExecutor = ThreadPoolFactory.createThreadPool(
+          responseAggregationThreadPoolSize,
+          "ResponseAggregationThread",
+          config.getLogContext(),
+          responseAggregationQueueCapacity,
+          LINKED_BLOCKING_QUEUE);
+      new ThreadPoolStats(metricsRepository, responseAggregationExecutor, "response_aggregation_thread_pool");
+      LOGGER.info(
+          "Response aggregation thread pool enabled with size: {}, queue capacity: {}",
+          responseAggregationThreadPoolSize,
+          responseAggregationQueueCapacity);
+    } else {
+      LOGGER.info("Response aggregation thread pool disabled (size <= 0), using Netty EventLoop for aggregation");
+    }
+
     ScatterGatherHelper scatterGather = ScatterGatherHelper
         .<Instance, VenicePath, RouterKey, VeniceRole, BasicFullHttpRequest, FullHttpResponse, HttpResponseStatus>builder()
         .roleFinder(new VeniceRoleFinder())
@@ -630,6 +696,7 @@ public class RouterServer extends AbstractVeniceService {
         .scatterGatherStatsProvider(new LongTailRetryStatsProvider(routerStats))
         .enableStackTraceResponseForException(true)
         .enableRetryRequestAlwaysUseADifferentHost(true)
+        .responseAggregationExecutor(responseAggregationExecutor)
         .build();
 
     SecurityStats securityStats = new SecurityStats(this.metricsRepository, "security");
@@ -690,13 +757,13 @@ public class RouterServer extends AbstractVeniceService {
     if (sslFactory.isPresent()) {
       sslInitializer = new SslInitializer(SslUtils.toAlpiniSSLFactory(sslFactory.get()), false);
       if (config.getResolveThreads() > 0) {
-        ThreadPoolExecutor dnsResolveExecutor = ThreadPoolFactory.createThreadPool(
+        this.dnsResolveExecutor = ThreadPoolFactory.createThreadPool(
             config.getResolveThreads(),
             "DNSResolveThread",
             config.getLogContext(),
             config.getResolveQueueCapacity(),
             LINKED_BLOCKING_QUEUE);
-        new ThreadPoolStats(metricsRepository, dnsResolveExecutor, "dns_resolution_thread_pool");
+        new ThreadPoolStats(metricsRepository, this.dnsResolveExecutor, "dns_resolution_thread_pool");
         int resolveThreads = config.getResolveThreads();
         int maxConcurrentSslHandshakes = config.getMaxConcurrentSslHandshakes();
         int clientResolutionRetryAttempts = config.getClientResolutionRetryAttempts();
@@ -890,6 +957,7 @@ public class RouterServer extends AbstractVeniceService {
 
     routersClusterManager.unregisterRouter(Utils.getHelixNodeIdentifier(config.getHostname(), config.getPort()));
     routersClusterManager.clear();
+    dictionaryRetrievalService.stop();
     routingDataRepository.clear();
     metadataRepository.clear();
     schemaRepository.clear();
@@ -897,7 +965,6 @@ public class RouterServer extends AbstractVeniceService {
     hybridStoreQuotaRepository.ifPresent(repo -> repo.clear());
     liveInstanceMonitor.clear();
     timeoutProcessor.shutdownNow();
-    dictionaryRetrievalService.stop();
     if (instanceConfigRepository != null) {
       instanceConfigRepository.clear();
     }
@@ -912,6 +979,12 @@ public class RouterServer extends AbstractVeniceService {
     }
     if (retryManagerExecutorService != null) {
       retryManagerExecutorService.shutdownNow();
+    }
+    if (responseAggregationExecutor != null) {
+      responseAggregationExecutor.shutdownNow();
+    }
+    if (dnsResolveExecutor != null) {
+      dnsResolveExecutor.shutdownNow();
     }
   }
 
@@ -1009,7 +1082,7 @@ public class RouterServer extends AbstractVeniceService {
       // Dictionary retrieval service should start only after "metadataRepository.refresh()" otherwise it won't be able
       // to preload dictionaries from SN.
       try {
-        dictionaryRetrievalService.startInner();
+        dictionaryRetrievalService.start();
       } catch (VeniceException e) {
         LOGGER.error("Encountered issue when starting dictionary retriever", e);
         handleExceptionInStartServices(e, async);

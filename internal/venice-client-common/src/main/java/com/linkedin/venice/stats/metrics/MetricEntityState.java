@@ -11,6 +11,7 @@ import io.opentelemetry.api.metrics.ObservableLongMeasurement;
 import io.tehuti.metrics.MeasurableStat;
 import java.util.List;
 import java.util.Map;
+import java.util.function.LongSupplier;
 import java.util.function.ObjDoubleConsumer;
 import java.util.function.ObjLongConsumer;
 
@@ -44,7 +45,7 @@ public abstract class MetricEntityState extends AsyncMetricEntityState {
         registerTehutiSensorFn,
         tehutiMetricNameEnum,
         tehutiMetricStats,
-        null,
+        (LongSupplier) null,
         null);
     MetricType metricType = metricEntity.getMetricType();
     this.isObservableCounter = metricType.isObservableCounterType();
@@ -95,7 +96,13 @@ public abstract class MetricEntityState extends AsyncMetricEntityState {
     for (MetricAttributesData holder: allData) {
       if (holder.hasAdder()) {
         long value = holder.sumThenReset();
-        measurement.record(value, holder.getAttributes());
+        // Skip zero values to avoid polluting metrics with stale attribute combinations
+        // (e.g., from deleted stores) rather than trying to clean up all the registered
+        // callbacks which could be complex. For delta-temporality async counters, omitting
+        // a zero report correctly means "no change in this period."
+        if (value != 0) {
+          measurement.record(value, holder.getAttributes());
+        }
       }
     }
   }
@@ -143,18 +150,20 @@ public abstract class MetricEntityState extends AsyncMetricEntityState {
   }
 
   /**
-   * Record otel metrics with MetricAttributesData (double version for histograms)
+   * Record OTel metrics only. Package-private to prevent external callers from bypassing the unified
+   * {@link #record(double, MetricAttributesData)} API, which records to both OTel and Tehuti.
    */
-  public void recordOtelMetric(double value, MetricAttributesData holder) {
+  void recordOtelMetric(double value, MetricAttributesData holder) {
     if (otelMetric != null) {
       otelDoubleRecordingStrategy.accept(holder, value);
     }
   }
 
   /**
-   * Record otel metrics with MetricAttributesData (long version)
+   * Record OTel metrics only. Package-private to prevent external callers from bypassing the unified
+   * {@link #record(long, MetricAttributesData)} API, which records to both OTel and Tehuti.
    */
-  public void recordOtelMetric(long value, MetricAttributesData holder) {
+  void recordOtelMetric(long value, MetricAttributesData holder) {
     if (otelMetric != null) {
       otelLongRecordingStrategy.accept(holder, value);
     }

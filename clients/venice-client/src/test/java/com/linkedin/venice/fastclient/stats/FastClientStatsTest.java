@@ -254,4 +254,5 @@ public class FastClientStatsTest {
         .put(VENICE_REQUEST_REJECTION_REASON.getDimensionNameInDefaultFormat(), rejectionReason.getDimensionValue())
         .build();
   }
+
 }

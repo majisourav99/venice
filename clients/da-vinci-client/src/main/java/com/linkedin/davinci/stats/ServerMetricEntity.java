@@ -1,53 +1,51 @@
 package com.linkedin.davinci.stats;
 
-import static com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions.VENICE_CLUSTER_NAME;
-import static com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions.VENICE_REGION_NAME;
-import static com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions.VENICE_REPLICA_STATE;
-import static com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions.VENICE_REPLICA_TYPE;
-import static com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions.VENICE_STORE_NAME;
-import static com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions.VENICE_VERSION_ROLE;
-import static com.linkedin.venice.utils.Utils.setOf;
+import static com.linkedin.venice.stats.metrics.ModuleMetricEntityInterface.getUniqueMetricEntities;
 
-import com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions;
+import com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity;
+import com.linkedin.davinci.stats.ingestion.heartbeat.HeartbeatOtelMetricEntity;
+import com.linkedin.davinci.stats.ingestion.heartbeat.RecordLevelDelayOtelMetricEntity;
+import com.linkedin.venice.stats.ThreadPoolOtelMetricEntity;
 import com.linkedin.venice.stats.metrics.MetricEntity;
-import com.linkedin.venice.stats.metrics.MetricType;
-import com.linkedin.venice.stats.metrics.MetricUnit;
 import com.linkedin.venice.stats.metrics.ModuleMetricEntityInterface;
-import java.util.Set;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
 
 
 /**
- * List all metric entities for Venice server (storage node).
+ * Aggregates all metric entities for Venice server (storage node) from all server/da-vinci Metric entities.
+ *
+ * <p>When adding a new {@link ModuleMetricEntityInterface} enum, add it to
+ * {@link #getMetricEntityEnumClasses()} — both {@link #SERVER_METRIC_ENTITIES} and tests
+ * use this single source of truth.
  */
-public enum ServerMetricEntity implements ModuleMetricEntityInterface {
+public final class ServerMetricEntity {
   /**
-   * Heartbeat replication delay: Tracks nearline replication lag in milliseconds.
+   * Returns the enum classes that compose {@link #SERVER_METRIC_ENTITIES}. This is the single
+   * source of truth used by both production aggregation and tests.
    */
-  INGESTION_HEARTBEAT_DELAY(
-      "ingestion.replication.heartbeat.delay", MetricType.HISTOGRAM, MetricUnit.MILLISECOND,
-      "Nearline ingestion replication lag",
-      setOf(
-          VENICE_STORE_NAME,
-          VENICE_CLUSTER_NAME,
-          VENICE_REGION_NAME,
-          VENICE_VERSION_ROLE,
-          VENICE_REPLICA_TYPE,
-          VENICE_REPLICA_STATE)
-  );
-
-  private final MetricEntity metricEntity;
-
-  ServerMetricEntity(
-      String name,
-      MetricType metricType,
-      MetricUnit unit,
-      String description,
-      Set<VeniceMetricsDimensions> dimensionsList) {
-    this.metricEntity = new MetricEntity(name, metricType, unit, description, dimensionsList);
+  public static List<Class<? extends ModuleMetricEntityInterface>> getMetricEntityEnumClasses() {
+    return Arrays.asList(
+        IngestionOtelMetricEntity.class,
+        HeartbeatOtelMetricEntity.class,
+        RecordLevelDelayOtelMetricEntity.class,
+        ServerReadOtelMetricEntity.class,
+        ThreadPoolOtelMetricEntity.class,
+        ServerMetadataOtelMetricEntity.class,
+        ParticipantStoreConsumptionOtelMetricEntity.class,
+        AdaptiveThrottlingOtelMetricEntity.class,
+        HeartbeatMonitoringOtelMetricEntity.class,
+        BlobTransferOtelMetricEntity.class,
+        KafkaConsumerServiceOtelMetricEntity.class,
+        RocksDBMemoryOtelMetricEntity.class,
+        DIVOtelMetricEntity.class,
+        ServerReadQuotaOtelMetricEntity.class);
   }
 
-  @Override
-  public MetricEntity getMetricEntity() {
-    return metricEntity;
+  public static final Collection<MetricEntity> SERVER_METRIC_ENTITIES =
+      getUniqueMetricEntities(getMetricEntityEnumClasses());
+
+  private ServerMetricEntity() {
   }
 }

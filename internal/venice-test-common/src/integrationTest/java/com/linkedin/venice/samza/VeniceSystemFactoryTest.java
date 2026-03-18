@@ -269,4 +269,5 @@ public class VeniceSystemFactoryTest {
       assertEquals(((VeniceSystemProducer) producer4).getRunningFabric(), "dc-parent");
     }
   }
+
 }

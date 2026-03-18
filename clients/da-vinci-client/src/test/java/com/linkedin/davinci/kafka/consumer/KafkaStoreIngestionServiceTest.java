@@ -35,6 +35,7 @@ import com.linkedin.davinci.store.AbstractStorageEngineTest;
 import com.linkedin.davinci.store.DelegatingStorageEngine;
 import com.linkedin.davinci.store.StorageEngine;
 import com.linkedin.davinci.transformer.TestStringRecordTransformer;
+import com.linkedin.venice.acl.VeniceComponent;
 import com.linkedin.venice.client.store.ClientConfig;
 import com.linkedin.venice.exceptions.VeniceNoStoreException;
 import com.linkedin.venice.meta.ClusterInfoProvider;
@@ -68,13 +69,14 @@ import com.linkedin.venice.schema.SchemaEntry;
 import com.linkedin.venice.serialization.avro.AvroProtocolDefinition;
 import com.linkedin.venice.service.ICProvider;
 import com.linkedin.venice.tehuti.MockTehutiReporter;
-import com.linkedin.venice.utils.DataProviderUtils;
 import com.linkedin.venice.utils.LogContext;
 import com.linkedin.venice.utils.ReferenceCounted;
 import com.linkedin.venice.utils.TestUtils;
 import com.linkedin.venice.utils.VeniceProperties;
 import com.linkedin.venice.utils.locks.ResourceAutoClosableLockManager;
+import io.tehuti.metrics.MetricConfig;
 import io.tehuti.metrics.MetricsRepository;
+import io.tehuti.metrics.stats.AsyncGauge;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
 import it.unimi.dsi.fastutil.objects.Object2IntMaps;
 import java.lang.reflect.Field;
@@ -151,7 +153,6 @@ public abstract class KafkaStoreIngestionServiceTest {
         AvroProtocolDefinition.PARTITION_STATE.getSerializer(),
         Optional.empty(),
         null,
-        false,
         compressorFactory,
         Optional.empty(),
         false,
@@ -192,7 +193,10 @@ public abstract class KafkaStoreIngestionServiceTest {
     doReturn(1).when(mockVeniceServerConfig).getStoreWriterNumber();
     doReturn(5).when(mockVeniceServerConfig).getIdleIngestionTaskCleanupIntervalInSeconds();
     doReturn(1).when(mockVeniceServerConfig).getStoreChangeNotifierThreadPoolSize();
-    doReturn(LogContext.EMPTY).when(mockVeniceServerConfig).getLogContext();
+    doReturn(
+        LogContext.newBuilder().setComponentName(VeniceComponent.SERVER.name()).setRegionName("test-region").build())
+            .when(mockVeniceServerConfig)
+            .getLogContext();
 
     // Consumer related configs for preparing kafka consumer service.
     doReturn(dummyKafkaUrl).when(mockVeniceServerConfig).getKafkaBootstrapServers();
@@ -303,26 +307,26 @@ public abstract class KafkaStoreIngestionServiceTest {
     topicNameToIngestionTaskMap.forEach((topicName, task) -> {
       if (Version.parseStoreFromKafkaTopicName(topicName).equals(mockStoreName)) {
         if (topicName.equals(mostRecentTopic)) {
-          verify(task).enableMetricsEmission();
+          verify(task).enableTehutiMetrics();
         } else {
-          verify(task).disableMetricsEmission();
+          verify(task).disableTehutiMetrics();
         }
       } else { // checks store with similar name will not be call
-        verify(task, never()).enableMetricsEmission();
-        verify(task, never()).disableMetricsEmission();
+        verify(task, never()).enableTehutiMetrics();
+        verify(task, never()).disableTehutiMetrics();
       }
     });
 
     /**
     * Test when the latest push job for mock store is killed; the previous latest ongoing push job should enable
-    * metrics emission.
+    * Tehuti metrics emission.
     */
     topicNameToIngestionTaskMap.remove(mostRecentTopic);
     kafkaStoreIngestionService.updateStatsEmission(topicNameToIngestionTaskMap, mockStoreName);
     String latestOngoingPushJob = mockStoreName + "_v" + (taskNum - 1);
     topicNameToIngestionTaskMap.forEach((topicName, task) -> {
       if (topicName.equals(latestOngoingPushJob)) {
-        verify(task).enableMetricsEmission();
+        verify(task).enableTehutiMetrics();
       }
     });
     kafkaStoreIngestionService.close();
@@ -455,8 +459,8 @@ public abstract class KafkaStoreIngestionServiceTest {
     kafkaStoreIngestionService.close();
   }
 
-  @Test(dataProvider = "True-and-False", dataProviderClass = DataProviderUtils.class)
-  public void testStoreIngestionTaskShutdownLastPartition(boolean isIsolatedIngestion) {
+  @Test
+  public void testStoreIngestionTaskShutdownLastPartition() {
     HeartbeatMonitoringService mockHeartbeatMonitoringService = mock(HeartbeatMonitoringService.class);
     kafkaStoreIngestionService = new KafkaStoreIngestionService(
         mockStorageService,
@@ -472,7 +476,6 @@ public abstract class KafkaStoreIngestionServiceTest {
         AvroProtocolDefinition.PARTITION_STATE.getSerializer(),
         Optional.empty(),
         null,
-        isIsolatedIngestion,
         compressorFactory,
         Optional.empty(),
         false,
@@ -505,11 +508,7 @@ public abstract class KafkaStoreIngestionServiceTest {
     kafkaStoreIngestionService.startConsumption(config, 0, Optional.empty());
     kafkaStoreIngestionService.stopConsumptionAndWait(config, 0, 1, 1, true);
     StoreIngestionTask storeIngestionTask = kafkaStoreIngestionService.getStoreIngestionTask(topicName);
-    if (isIsolatedIngestion) {
-      Assert.assertNotNull(storeIngestionTask);
-    } else {
-      assertNull(storeIngestionTask);
-    }
+    assertNull(storeIngestionTask);
     kafkaStoreIngestionService.startConsumption(config, 0, Optional.empty());
     storeIngestionTask = kafkaStoreIngestionService.getStoreIngestionTask(topicName);
     storeIngestionTask.setPartitionConsumptionState(1, mock(PartitionConsumptionState.class));
@@ -661,8 +660,9 @@ public abstract class KafkaStoreIngestionServiceTest {
     Set<PubSubTopicPartition> topicPartitionsToUnsubscribe = new HashSet<>();
     topicPartitionsToUnsubscribe.add(new PubSubTopicPartitionImpl(pubSubTopicRepository.getTopic(topicName), 0));
     storeIngestionTask.consumerBatchUnsubscribe(topicPartitionsToUnsubscribe);
-    // Verify that the store ingestion task is marked as idle and eventually closed
-    TestUtils.waitForNonDeterministicAssertion(1, TimeUnit.MINUTES, () -> {
+    // Verify that the store ingestion task is marked as idle and eventually closed.
+    // The cleanup executor runs every 5s (configured in setupMockConfig), so 15s is ample.
+    TestUtils.waitForNonDeterministicAssertion(15, TimeUnit.SECONDS, () -> {
       Assert.assertTrue(storeIngestionTask.isIdleOverThreshold());
       Assert.assertNull(kafkaStoreIngestionService.getStoreIngestionTask(topicName));
     });
@@ -699,8 +699,9 @@ public abstract class KafkaStoreIngestionServiceTest {
     Set<PubSubTopicPartition> topicPartitionsToUnsubscribe = new HashSet<>();
     topicPartitionsToUnsubscribe.add(new PubSubTopicPartitionImpl(pubSubTopicRepository.getTopic(topicName), 0));
     storeIngestionTask.consumerBatchUnsubscribe(topicPartitionsToUnsubscribe);
-    // Verify that the store ingestion task is marked as idle and eventually closed
-    TestUtils.waitForNonDeterministicAssertion(1, TimeUnit.MINUTES, () -> {
+    // Verify that the store ingestion task is marked as idle and eventually closed.
+    // The cleanup executor runs every 5s, so 15s is ample.
+    TestUtils.waitForNonDeterministicAssertion(15, TimeUnit.SECONDS, () -> {
       Assert.assertTrue(storeIngestionTask.isIdleOverThreshold());
     });
     // verify has active replicas
@@ -843,8 +844,9 @@ public abstract class KafkaStoreIngestionServiceTest {
     // Close the existing service first
     kafkaStoreIngestionService.close();
 
-    // Create a new MetricsRepository with a reporter to verify metrics
-    MetricsRepository metricsRepository = new MetricsRepository();
+    // Use a dedicated AsyncGaugeExecutor to avoid contention with the shared default executor in CI
+    AsyncGauge.AsyncGaugeExecutor gaugeExecutor = new AsyncGauge.AsyncGaugeExecutor.Builder().build();
+    MetricsRepository metricsRepository = new MetricsRepository(new MetricConfig(gaugeExecutor));
     MockTehutiReporter reporter = new MockTehutiReporter();
     metricsRepository.addReporter(reporter);
 
@@ -872,7 +874,10 @@ public abstract class KafkaStoreIngestionServiceTest {
     doReturn(1).when(serverConfig).getStoreWriterNumber();
     doReturn(0).when(serverConfig).getIdleIngestionTaskCleanupIntervalInSeconds();
     doReturn(1).when(serverConfig).getStoreChangeNotifierThreadPoolSize();
-    doReturn(LogContext.EMPTY).when(serverConfig).getLogContext();
+    doReturn(
+        LogContext.newBuilder().setComponentName(VeniceComponent.SERVER.name()).setRegionName("test-region").build())
+            .when(serverConfig)
+            .getLogContext();
     doReturn(dummyKafkaUrl).when(serverConfig).getKafkaBootstrapServers();
     Function<String, String> kafkaClusterUrlResolver = String::toString;
     doReturn(kafkaClusterUrlResolver).when(serverConfig).getKafkaClusterUrlResolver();
@@ -921,7 +926,6 @@ public abstract class KafkaStoreIngestionServiceTest {
         AvroProtocolDefinition.PARTITION_STATE.getSerializer(),
         Optional.empty(),
         null,
-        false,
         compressorFactory,
         Optional.empty(),
         false,
@@ -956,17 +960,43 @@ public abstract class KafkaStoreIngestionServiceTest {
           reporter.query(".aa_wc_ingestion_storage_lookup_thread_pool--queued_task_count_gauge.LambdaStat"),
           "AA/WC ingestion storage lookup thread pool queued_task_count_gauge metric should be registered");
 
-      // Verify the max thread numbers are set correctly
-      assertEquals(
-          (int) reporter.query(".aa_wc_parallel_processing_thread_pool--max_thread_number.LambdaStat").value(),
-          4,
-          "AA/WC parallel processing thread pool should have 4 threads");
-      assertEquals(
-          (int) reporter.query(".aa_wc_ingestion_storage_lookup_thread_pool--max_thread_number.LambdaStat").value(),
-          2,
-          "AA/WC ingestion storage lookup thread pool should have 2 threads");
+      // Metric registration may complete asynchronously; retry until values are available.
+      TestUtils.waitForNonDeterministicAssertion(10, TimeUnit.SECONDS, () -> {
+        assertEquals(
+            (int) reporter.query(".aa_wc_parallel_processing_thread_pool--max_thread_number.LambdaStat").value(),
+            4,
+            "AA/WC parallel processing thread pool should have 4 threads");
+        assertEquals(
+            (int) reporter.query(".aa_wc_ingestion_storage_lookup_thread_pool--max_thread_number.LambdaStat").value(),
+            2,
+            "AA/WC ingestion storage lookup thread pool should have 2 threads");
+      });
     } finally {
       service.close();
+      metricsRepository.close();
+      try {
+        gaugeExecutor.close();
+      } catch (Exception e) {
+        // best-effort cleanup
+      }
     }
+  }
+
+  @Test
+  public void testUnregisterRecordTransformerConfig() {
+    String storeName = "test-store";
+
+    // Register a record transformer config
+    DaVinciRecordTransformerConfig recordTransformerConfig =
+        new DaVinciRecordTransformerConfig.Builder().setRecordTransformerFunction(TestStringRecordTransformer::new)
+            .build();
+    kafkaStoreIngestionService.registerRecordTransformerConfig(storeName, recordTransformerConfig);
+    assertNotNull(kafkaStoreIngestionService.getInternalRecordTransformerConfig(storeName));
+
+    // Unregister the config
+    kafkaStoreIngestionService.unregisterRecordTransformerConfig(storeName);
+
+    // Verify the record transformer config is removed
+    assertNull(kafkaStoreIngestionService.getInternalRecordTransformerConfig(storeName));
   }
 }

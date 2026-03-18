@@ -1,6 +1,7 @@
 package com.linkedin.venice.endToEnd;
 
 import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_BLOCK_CACHE_SIZE_IN_BYTES;
+import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_MEMTABLE_SIZE_IN_BYTES;
 import static com.linkedin.venice.ConfigKeys.CLIENT_SYSTEM_STORE_REPOSITORY_REFRESH_INTERVAL_SECONDS;
 import static com.linkedin.venice.ConfigKeys.CLIENT_USE_SYSTEM_STORE_REPOSITORY;
 import static com.linkedin.venice.ConfigKeys.CLUSTER_DISCOVERY_D2_SERVICE;
@@ -9,8 +10,9 @@ import static com.linkedin.venice.ConfigKeys.DATA_BASE_PATH;
 import static com.linkedin.venice.ConfigKeys.DAVINCI_PUSH_STATUS_SCAN_NO_REPORT_RETRY_MAX_ATTEMPTS;
 import static com.linkedin.venice.ConfigKeys.PERSISTENCE_TYPE;
 import static com.linkedin.venice.ConfigKeys.PUSH_STATUS_STORE_ENABLED;
+import static com.linkedin.venice.ConfigKeys.SERVER_DATABASE_SYNC_BYTES_INTERNAL_FOR_DEFERRED_WRITE_MODE;
+import static com.linkedin.venice.ConfigKeys.SERVER_DATABASE_SYNC_BYTES_INTERNAL_FOR_TRANSACTIONAL_MODE;
 import static com.linkedin.venice.ConfigKeys.SERVER_DISK_FULL_THRESHOLD;
-import static com.linkedin.venice.ConfigKeys.SERVER_INGESTION_ISOLATION_D2_CLIENT_ENABLED;
 import static com.linkedin.venice.ConfigKeys.USE_DA_VINCI_SPECIFIC_EXECUTION_STATUS_FOR_ERROR;
 import static com.linkedin.venice.integration.utils.DaVinciTestContext.getCachingDaVinciClientFactory;
 import static com.linkedin.venice.integration.utils.ServiceFactory.getVeniceCluster;
@@ -19,6 +21,9 @@ import static com.linkedin.venice.utils.IntegrationTestPushUtils.createStoreForJ
 import static com.linkedin.venice.utils.IntegrationTestPushUtils.defaultVPJProps;
 import static com.linkedin.venice.utils.IntegrationTestPushUtils.runVPJ;
 import static com.linkedin.venice.utils.TestWriteUtils.getTempDataDirectory;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotNull;
@@ -47,6 +52,7 @@ import com.linkedin.venice.integration.utils.VeniceRouterWrapper;
 import com.linkedin.venice.pushmonitor.ExecutionStatus;
 import com.linkedin.venice.status.protocol.PushJobDetails;
 import com.linkedin.venice.utils.DataProviderUtils;
+import com.linkedin.venice.utils.DiskUsage;
 import com.linkedin.venice.utils.PropertyBuilder;
 import com.linkedin.venice.utils.TestUtils;
 import com.linkedin.venice.utils.TestWriteUtils;
@@ -54,10 +60,6 @@ import com.linkedin.venice.utils.Utils;
 import com.linkedin.venice.utils.VeniceProperties;
 import io.tehuti.metrics.MetricsRepository;
 import java.io.File;
-import java.io.IOException;
-import java.nio.file.FileStore;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -65,10 +67,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.avro.Schema;
-import org.apache.commons.io.FileUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.mockito.MockedConstruction;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -77,15 +80,11 @@ import org.testng.annotations.Test;
 public class DaVinciClientDiskFullTest {
   private static final Logger LOGGER = LogManager.getLogger(DaVinciClientDiskFullTest.class);
   private static final int TEST_TIMEOUT = 180_000;
-  // Maximum record size allowed by VPJ is ~950KB, use 900KB to be safe
-  private static final int MAX_RECORD_SIZE = 900_000;
-  // Minimum data size to write (100MB) - actual size may be larger based on disk space
-  private static final long MIN_DATA_SIZE_BYTES = 100_000_000L;
+  // v2 push: enough records to trigger ingestion, but size doesn't matter since DiskUsage is mocked
+  private static final int LARGE_PUSH_RECORD_COUNT = 100;
+  private static final int LARGE_PUSH_RECORD_SIZE = 1000;
   private VeniceClusterWrapper venice;
   private D2Client d2Client;
-  // Calculated dynamically based on disk space to ensure we exceed DiskUsage reserve
-  private int largePushRecordCount;
-  private int largePushRecordMinSize;
 
   @BeforeClass
   public void setUp() {
@@ -118,58 +117,7 @@ public class DaVinciClientDiskFullTest {
     Utils.closeQuietlyWithErrorLogged(venice);
   }
 
-  /**
-   * Calculate the data size and threshold needed to trigger disk full during the large push.
-   *
-   * DiskUsage has a reserve mechanism: reserveSpaceBytes = 0.001 * freeSpaceBytesRequired
-   * The actual disk check only happens after writing reserveSpaceBytes worth of data.
-   * So we need: dataSize > reserveSpaceBytes
-   *
-   * Since freeSpaceBytesRequired ≈ usableSpaceBytes, we need: dataSize > 0.001 * usableSpaceBytes
-   * We use 0.3% of usable space (3x the minimum) for safety margin.
-   *
-   * This method sets {@link #largePushRecordCount} and {@link #largePushRecordMinSize},
-   * and returns the threshold.
-   */
-  private double calculateDataSizeAndThreshold() throws IOException {
-    FileStore disk = Files.getFileStore(Paths.get(FileUtils.getTempDirectoryPath()));
-    long totalSpaceBytes = disk.getTotalSpace();
-    long usableSpaceBytes = disk.getUsableSpace();
-
-    // Calculate minimum data size needed to exceed DiskUsage reserve (0.1% of freeSpaceBytesRequired)
-    // Use 0.3% of usable space for safety margin (3x the reserve)
-    long minRequiredDataSize = (long) (usableSpaceBytes * 0.003);
-    // Use at least MIN_DATA_SIZE_BYTES, but scale up if disk is very large
-    long dataSizeBytes = Math.max(MIN_DATA_SIZE_BYTES, minRequiredDataSize);
-
-    // Calculate record count and size, respecting MAX_RECORD_SIZE limit
-    // Use MAX_RECORD_SIZE and calculate how many records we need
-    largePushRecordMinSize = MAX_RECORD_SIZE;
-    largePushRecordCount = (int) Math.max(1, dataSizeBytes / largePushRecordMinSize);
-    long actualDataSize = (long) largePushRecordMinSize * largePushRecordCount;
-
-    // Set threshold so disk becomes "full" after writing half the data
-    long marginBytes = actualDataSize / 2;
-    // freeSpaceBytesRequired = (1 - threshold) * totalSpaceBytes = usableSpaceBytes - marginBytes
-    // threshold = 1 - (usableSpaceBytes - marginBytes) / totalSpaceBytes
-    double diskFullThreshold = 1.0 - (double) (usableSpaceBytes - marginBytes) / totalSpaceBytes;
-    diskFullThreshold = Math.max(0.01, Math.min(0.99, diskFullThreshold));
-
-    LOGGER.info(
-        "Disk: totalSpace={}, usableSpace={}, minRequiredDataSize={}, actualDataSize={}, recordCount={}, recordSize={}, threshold={}",
-        totalSpaceBytes,
-        usableSpaceBytes,
-        minRequiredDataSize,
-        actualDataSize,
-        largePushRecordCount,
-        largePushRecordMinSize,
-        diskFullThreshold);
-    return diskFullThreshold;
-  }
-
-  private VeniceProperties getDaVinciBackendConfig(
-      boolean useDaVinciSpecificExecutionStatusForError,
-      Boolean isD2ClientEnabled) throws IOException {
+  private VeniceProperties getDaVinciBackendConfig(boolean useDaVinciSpecificExecutionStatusForError) {
     String baseDataPath = Utils.getTempDataDirectory().getAbsolutePath();
     PropertyBuilder venicePropertyBuilder = new PropertyBuilder();
 
@@ -180,10 +128,13 @@ public class DaVinciClientDiskFullTest {
         .put(PUSH_STATUS_STORE_ENABLED, true)
         .put(D2_ZK_HOSTS_ADDRESS, venice.getZk().getAddress())
         .put(ROCKSDB_BLOCK_CACHE_SIZE_IN_BYTES, 2 * 1024 * 1024L)
+        .put(ROCKSDB_MEMTABLE_SIZE_IN_BYTES, 2 * 1024 * 1024L)
+        .put(SERVER_DATABASE_SYNC_BYTES_INTERNAL_FOR_DEFERRED_WRITE_MODE, 2 * 1024 * 1024L)
+        .put(SERVER_DATABASE_SYNC_BYTES_INTERNAL_FOR_TRANSACTIONAL_MODE, 2 * 1024 * 1024L)
         .put(CLUSTER_DISCOVERY_D2_SERVICE, VeniceRouterWrapper.CLUSTER_DISCOVERY_D2_SERVICE_NAME)
         .put(USE_DA_VINCI_SPECIFIC_EXECUTION_STATUS_FOR_ERROR, useDaVinciSpecificExecutionStatusForError)
-        .put(SERVER_DISK_FULL_THRESHOLD, calculateDataSizeAndThreshold())
-        .put(SERVER_INGESTION_ISOLATION_D2_CLIENT_ENABLED, isD2ClientEnabled);
+        // Threshold value is irrelevant — DiskUsage is mocked via mockConstruction in the test
+        .put(SERVER_DISK_FULL_THRESHOLD, 0.95);
     return venicePropertyBuilder.build();
   }
 
@@ -236,9 +187,24 @@ public class DaVinciClientDiskFullTest {
     }
   }
 
-  @Test(timeOut = TEST_TIMEOUT, dataProviderClass = DataProviderUtils.class, dataProvider = "Two-True-and-False")
-  public void testDaVinciDiskFullFailure(boolean useDaVinciSpecificExecutionStatusForError, Boolean isD2ClientEnabled)
-      throws Exception {
+  /**
+   * Tests that DaVinci client correctly detects and reports disk full errors during ingestion.
+   *
+   * Uses {@code mockConstruction(DiskUsage.class)} to intercept the DiskUsage instance created
+   * inside KafkaStoreIngestionService. An {@link AtomicBoolean} controls when {@code isDiskFull()}
+   * returns true, making the test fully deterministic — no dependency on actual disk space,
+   * RocksDB flush timing, or CI runner disk fluctuations.
+   *
+   * Flow:
+   * 1. Push v1 (small, 1 record) via VPJ to server
+   * 2. Start DaVinci client with mocked DiskUsage (isDiskFull = false)
+   * 3. DaVinci subscribes and ingests v1 successfully
+   * 4. Flip isDiskFull to true
+   * 5. Push v2 — DaVinci ingests and immediately hits "disk full"
+   * 6. VPJ detects the DaVinci error status and throws VeniceException
+   */
+  @Test(timeOut = TEST_TIMEOUT, dataProviderClass = DataProviderUtils.class, dataProvider = "True-and-False")
+  public void testDaVinciDiskFullFailure(boolean useDaVinciSpecificExecutionStatusForError) throws Exception {
     String storeName = Utils.getUniqueString("davinci_disk_full_test");
     // Test a small push
     File inputDir = getTempDataDirectory();
@@ -275,65 +241,84 @@ public class DaVinciClientDiskFullTest {
         }
       });
 
-      // Spin up DaVinci client
-      VeniceProperties backendConfig =
-          getDaVinciBackendConfig(useDaVinciSpecificExecutionStatusForError, isD2ClientEnabled);
-      MetricsRepository metricsRepository = new MetricsRepository();
-      try (CachingDaVinciClientFactory factory = getCachingDaVinciClientFactory(
-          d2Client,
-          VeniceRouterWrapper.CLUSTER_DISCOVERY_D2_SERVICE_NAME,
-          metricsRepository,
-          backendConfig,
-          venice)) {
+      // Use mockConstruction to intercept DiskUsage created inside KafkaStoreIngestionService.
+      // This eliminates all non-determinism from disk space measurement and RocksDB flush timing.
+      AtomicBoolean simulateDiskFull = new AtomicBoolean(false);
 
-        DaVinciClient daVinciClient = factory.getGenericAvroClient(
-            storeName,
-            new DaVinciConfig().setIsolated(true).setStorageClass(StorageClass.MEMORY_BACKED_BY_DISK));
-        daVinciClient.start();
+      try (MockedConstruction<DiskUsage> mockedDiskUsage = mockConstruction(DiskUsage.class, (mock, context) -> {
+        when(mock.isDiskFull(anyLong())).thenAnswer(inv -> simulateDiskFull.get());
+        when(mock.getDiskStatus()).thenReturn("Mocked DiskUsage: simulated disk full for testing");
+      })) {
+        // Spin up DaVinci client — DiskUsage constructor is intercepted by mockConstruction
+        VeniceProperties backendConfig = getDaVinciBackendConfig(useDaVinciSpecificExecutionStatusForError);
+        MetricsRepository metricsRepository = new MetricsRepository();
+        try (CachingDaVinciClientFactory factory = getCachingDaVinciClientFactory(
+            d2Client,
+            VeniceRouterWrapper.CLUSTER_DISCOVERY_D2_SERVICE_NAME,
+            metricsRepository,
+            backendConfig,
+            venice)) {
 
-        daVinciClient.subscribeAll().get(30, TimeUnit.SECONDS);
+          DaVinciClient daVinciClient = factory.getGenericAvroClient(
+              storeName,
+              new DaVinciConfig().setIsolated(true).setStorageClass(StorageClass.MEMORY_BACKED_BY_DISK));
+          daVinciClient.start();
 
-        // Validate entries
-        for (int i = 1; i <= 1; i++) {
-          String key = Integer.toString(i);
-          Object value = daVinciClient.get(key).get();
-          assertNotNull(value, "Key " + i + " should not be missing!");
+          daVinciClient.subscribeAll().get(30, TimeUnit.SECONDS);
+
+          // Verify mockConstruction intercepted the DiskUsage constructor.
+          // If this fails, a refactor moved DiskUsage creation outside KafkaStoreIngestionService.
+          assertFalse(
+              mockedDiskUsage.constructed().isEmpty(),
+              "mockConstruction did not intercept any DiskUsage construction — "
+                  + "DiskUsage may no longer be created in the DaVinci client path");
+
+          // Validate entries
+          for (int i = 1; i <= 1; i++) {
+            String key = Integer.toString(i);
+            Object value = daVinciClient.get(key).get();
+            assertNotNull(value, "Key " + i + " should not be missing!");
+          }
+
+          // Deterministically trigger disk full — every subsequent isDiskFull() call returns true
+          LOGGER.info("Flipping simulateDiskFull to true before v2 push");
+          simulateDiskFull.set(true);
+
+          // Run a push that will trigger disk full in DaVinci
+          inputDir = getTempDataDirectory();
+          inputDirPath = "file://" + inputDir.getAbsolutePath();
+          TestWriteUtils
+              .writeSimpleAvroFileWithStringToStringSchema(inputDir, LARGE_PUSH_RECORD_COUNT, LARGE_PUSH_RECORD_SIZE);
+          final Properties vpjPropertiesForV2 = defaultVPJProps(venice, inputDirPath, storeName);
+
+          SentPushJobDetailsTrackerImpl pushJobDetailsTracker = new SentPushJobDetailsTrackerImpl();
+
+          VeniceException exception = expectThrows(
+              VeniceException.class,
+              () -> runVPJ(vpjPropertiesForV2, 2, controllerClient, Optional.of(pushJobDetailsTracker)));
+          assertTrue(
+              exception.getMessage()
+                  .contains(
+                      "status: " + (useDaVinciSpecificExecutionStatusForError
+                          ? ExecutionStatus.DVC_INGESTION_ERROR_DISK_FULL
+                          : ExecutionStatus.ERROR)),
+              exception.getMessage());
+          assertTrue(
+              exception.getMessage()
+                  .contains(
+                      "Found a failed partition replica in Da Vinci"
+                          + (useDaVinciSpecificExecutionStatusForError ? " due to disk threshold reached" : "")),
+              exception.getMessage());
+
+          assertEquals(
+              pushJobDetailsTracker.getRecordedPushJobDetails()
+                  .get(pushJobDetailsTracker.getRecordedPushJobDetails().size() - 1)
+                  .getPushJobLatestCheckpoint()
+                  .intValue(),
+              useDaVinciSpecificExecutionStatusForError
+                  ? PushJobCheckpoints.DVC_INGESTION_ERROR_DISK_FULL.getValue()
+                  : PushJobCheckpoints.START_JOB_STATUS_POLLING.getValue());
         }
-
-        // Run a bigger push and the push should fail
-        inputDir = getTempDataDirectory();
-        inputDirPath = "file://" + inputDir.getAbsolutePath();
-        TestWriteUtils
-            .writeSimpleAvroFileWithStringToStringSchema(inputDir, largePushRecordCount, largePushRecordMinSize);
-        final Properties vpjPropertiesForV2 = defaultVPJProps(venice, inputDirPath, storeName);
-
-        SentPushJobDetailsTrackerImpl pushJobDetailsTracker = new SentPushJobDetailsTrackerImpl();
-
-        VeniceException exception = expectThrows(
-            VeniceException.class,
-            () -> runVPJ(vpjPropertiesForV2, 2, controllerClient, Optional.of(pushJobDetailsTracker)));
-        assertTrue(
-            exception.getMessage()
-                .contains(
-                    "status: " + (useDaVinciSpecificExecutionStatusForError
-                        ? ExecutionStatus.DVC_INGESTION_ERROR_DISK_FULL
-                        : ExecutionStatus.ERROR)),
-            exception.getMessage());
-        assertTrue(
-            exception.getMessage()
-                .contains(
-                    "Found a failed partition replica in Da Vinci"
-                        + (useDaVinciSpecificExecutionStatusForError ? " due to disk threshold reached" : "")),
-            exception.getMessage());
-
-        assertEquals(
-            pushJobDetailsTracker.getRecordedPushJobDetails()
-                .get(pushJobDetailsTracker.getRecordedPushJobDetails().size() - 1)
-                .getPushJobLatestCheckpoint()
-                .intValue(),
-            useDaVinciSpecificExecutionStatusForError
-                ? PushJobCheckpoints.DVC_INGESTION_ERROR_DISK_FULL.getValue()
-                : PushJobCheckpoints.START_JOB_STATUS_POLLING.getValue());
       } finally {
         controllerClient.disableAndDeleteStore(storeName);
       }

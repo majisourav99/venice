@@ -5,6 +5,7 @@ import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotEquals;
 import static org.testng.Assert.assertNotSame;
 import static org.testng.Assert.assertNull;
+import static org.testng.Assert.assertTrue;
 
 import java.util.Optional;
 import org.testng.annotations.Test;
@@ -117,5 +118,49 @@ public class PubSubTopicConfigurationTest {
     assertFalse(emptyConfig.minInSyncReplicas().isPresent(), "Min in-sync replicas should be empty.");
     assertNull(emptyConfig.minLogCompactionLagMs(), "Min log compaction lag ms should be null.");
     assertFalse(emptyConfig.getMaxLogCompactionLagMs().isPresent(), "Max log compaction lag ms should be empty.");
+  }
+
+  @Test
+  public void testUncleanLeaderElectionEnableDefaultIsEmpty() {
+    PubSubTopicConfiguration config =
+        new PubSubTopicConfiguration(Optional.of(1000L), true, Optional.of(1), 0L, Optional.empty());
+    assertFalse(config.getUncleanLeaderElectionEnable().isPresent());
+  }
+
+  @Test
+  public void testUncleanLeaderElectionEnableGetterSetter() {
+    PubSubTopicConfiguration config =
+        new PubSubTopicConfiguration(Optional.of(1000L), true, Optional.of(1), 0L, Optional.empty());
+
+    config.setUncleanLeaderElectionEnable(Optional.of(false));
+    assertTrue(config.getUncleanLeaderElectionEnable().isPresent());
+    assertFalse(config.getUncleanLeaderElectionEnable().get());
+
+    config.setUncleanLeaderElectionEnable(Optional.of(true));
+    assertTrue(config.getUncleanLeaderElectionEnable().get());
+
+    config.setUncleanLeaderElectionEnable(Optional.empty());
+    assertFalse(config.getUncleanLeaderElectionEnable().isPresent());
+  }
+
+  @Test
+  public void testUseAlternativeBackendDefaultIsFalse() {
+    PubSubTopicConfiguration config =
+        new PubSubTopicConfiguration(Optional.of(1000L), true, Optional.of(1), 0L, Optional.empty());
+    assertFalse(config.isUseAlternativeBackend());
+  }
+
+  @Test
+  public void testUseAlternativeBackendPassedThroughConstructor() {
+    PubSubTopicConfiguration config =
+        new PubSubTopicConfiguration(Optional.of(1000L), true, Optional.of(1), 0L, Optional.empty(), true);
+    assertTrue(config.isUseAlternativeBackend());
+  }
+
+  @Test
+  public void testUseAlternativeBackendIncludedInToString() {
+    PubSubTopicConfiguration config =
+        new PubSubTopicConfiguration(Optional.of(1000L), true, Optional.of(1), 0L, Optional.empty(), true);
+    assertTrue(config.toString().contains("useAlternativeBackend = true"));
   }
 }

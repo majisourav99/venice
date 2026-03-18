@@ -17,6 +17,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
 import com.linkedin.davinci.config.VeniceServerConfig;
@@ -40,12 +42,14 @@ import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.meta.VersionStatus;
 import com.linkedin.venice.store.rocksdb.RocksDBUtils;
 import com.linkedin.venice.utils.PropertyBuilder;
+import com.linkedin.venice.utils.TestUtils;
 import com.linkedin.venice.utils.Utils;
 import com.linkedin.venice.utils.VeniceProperties;
 import java.io.File;
 import java.nio.ByteBuffer;
 import java.util.Random;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.apache.commons.io.FileUtils;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.model.Message;
@@ -73,9 +77,10 @@ public class LeaderFollowerPartitionStateModelTest {
     ingestionBackend = mock(IngestionBackend.class);
     storeIngestionService = mock(KafkaStoreIngestionService.class);
     doReturn(storeIngestionService).when(ingestionBackend).getStoreIngestionService();
-    doReturn(CompletableFuture.completedFuture(null)).when(ingestionBackend).stopConsumption(any(), anyInt());
     doReturn(CompletableFuture.completedFuture(null)).when(ingestionBackend)
-        .dropStoragePartitionGracefully(any(), anyInt(), anyInt());
+        .stopConsumption(any(), anyInt(), anyString());
+    doReturn(CompletableFuture.completedFuture(null)).when(ingestionBackend)
+        .dropStoragePartitionGracefully(any(), anyInt(), anyInt(), anyString());
 
     storeAndServerConfigs = mock(VeniceStoreVersionConfig.class);
     notifier = mock(LeaderFollowerIngestionProgressNotifier.class);
@@ -83,7 +88,11 @@ public class LeaderFollowerPartitionStateModelTest {
     partitionPushStatusAccessorFuture = CompletableFuture.completedFuture(mock(HelixPartitionStatusAccessor.class));
     stateTransitionStats = mock(ParticipantStateTransitionStats.class);
     heartbeatMonitoringService = mock(HeartbeatMonitoringService.class);
-    leaderFollowerPartitionStateModel = new LeaderFollowerPartitionStateModel(
+    leaderFollowerPartitionStateModel = buildModel(notifier);
+  }
+
+  private LeaderFollowerPartitionStateModel buildModel(LeaderFollowerIngestionProgressNotifier notifier) {
+    return new LeaderFollowerPartitionStateModel(
         ingestionBackend,
         storeAndServerConfigs,
         partition,
@@ -109,23 +118,32 @@ public class LeaderFollowerPartitionStateModelTest {
 
     // STANDBY->LEADER
     leaderFollowerPartitionStateModelSpy.onBecomeLeaderFromStandby(message, context);
-    verify(heartbeatMonitoringService, never())
-        .updateLagMonitor(eq(resourceName), eq(partition), eq(HeartbeatLagMonitorAction.SET_LEADER_MONITOR));
+    verify(heartbeatMonitoringService, never()).updateLagMonitor(
+        eq(resourceName),
+        eq(partition),
+        eq(HeartbeatLagMonitorAction.SET_LEADER_MONITOR),
+        anyString());
 
     // LEADER->STANDBY
     leaderFollowerPartitionStateModelSpy.onBecomeStandbyFromLeader(message, context);
-    verify(heartbeatMonitoringService, never())
-        .updateLagMonitor(eq(resourceName), eq(partition), eq(HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR));
+    verify(heartbeatMonitoringService, never()).updateLagMonitor(
+        eq(resourceName),
+        eq(partition),
+        eq(HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR),
+        anyString());
 
     // OFFLINE->STANDBY
     leaderFollowerPartitionStateModelSpy.onBecomeStandbyFromOffline(message, context);
-    verify(heartbeatMonitoringService, times(1))
-        .updateLagMonitor(eq(resourceName), eq(partition), eq(HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR));
+    verify(heartbeatMonitoringService, times(1)).updateLagMonitor(
+        eq(resourceName),
+        eq(partition),
+        eq(HeartbeatLagMonitorAction.SET_FOLLOWER_MONITOR),
+        anyString());
 
     // STANDBY->OFFLINE
     leaderFollowerPartitionStateModelSpy.onBecomeOfflineFromStandby(message, context);
     verify(heartbeatMonitoringService)
-        .updateLagMonitor(eq(resourceName), eq(partition), eq(HeartbeatLagMonitorAction.REMOVE_MONITOR));
+        .updateLagMonitor(eq(resourceName), eq(partition), eq(HeartbeatLagMonitorAction.REMOVE_MONITOR), anyString());
   }
 
   @Test
@@ -359,6 +377,48 @@ public class LeaderFollowerPartitionStateModelTest {
   }
 
   /**
+   * OFFLINE->STANDBY needs to complete when the current version is demoted to a backup version.
+   */
+  @Test
+  public void testOnStandbyCompletionUponDemotionToBackupVersion() throws Exception {
+    Store store = mock(Store.class);
+    when(store.getCurrentVersion()).thenReturn(storeVersion); // Version starts as current so the latch is created
+    when(store.getBootstrapToOnlineTimeoutInHours()).thenReturn(24); // large timeout for latch await
+    doReturn(store).when(metadataRepo).getStoreOrThrow(anyString());
+    LeaderFollowerIngestionProgressNotifier notifier = new LeaderFollowerIngestionProgressNotifier();
+    LeaderFollowerPartitionStateModel model = buildModel(notifier);
+
+    // Start the OFFLINE -> STANDBY transition in a background thread which should be blocked in
+    // waitConsumptionCompleted, because this is the current version,
+    Message message = mock(Message.class);
+    when(message.getResourceName()).thenReturn(resourceName);
+    NotificationContext context = mock(NotificationContext.class);
+    CompletableFuture<Void> transitionFuture =
+        CompletableFuture.runAsync(() -> model.onBecomeStandbyFromOffline(message, context));
+
+    // Wait until the latch is created, confirming the transition is blocking.
+    TestUtils.waitForNonDeterministicAssertion(
+        5,
+        TimeUnit.SECONDS,
+        () -> assertNotNull(
+            notifier.getIngestionCompleteFlag(resourceName, partition),
+            "Latch must be created for a current-version OFFLINE->STANDBY transition"));
+    assertFalse(transitionFuture.isDone(), "Transition must be blocked waiting for the latch");
+
+    // Simulate CURRENT -> BACKUP version role flip: a newer version has been promoted.
+    when(store.getCurrentVersion()).thenReturn(storeVersion + 1);
+
+    // Simulate StoreIngestionTask.stopTrackingCurrentVersionIngestion() being called
+    notifier.stopped(resourceName, partition, null);
+    TestUtils.waitForNonDeterministicCompletion(5, TimeUnit.SECONDS, transitionFuture::isDone);
+    // Ensure the transition completed successfully (will throw if it completed exceptionally)
+    transitionFuture.join();
+    assertNull(
+        notifier.getIngestionCompleteFlag(resourceName, partition),
+        "Latch should be released/removed after current version is demoted");
+  }
+
+  /**
    * Integration test that verifies RocksDB deletion rate limiting is honored during
    * OFFLINE->DROPPED state transition (backup version deletion).
    * This test creates a real storage engine with data, then triggers the OFFLINE->DROPPED
@@ -436,7 +496,7 @@ public class LeaderFollowerPartitionStateModelTest {
       DefaultIngestionBackend realIngestionBackend = mock(DefaultIngestionBackend.class);
 
       // When dropStoragePartitionGracefully is called, actually delete the partition
-      when(realIngestionBackend.dropStoragePartitionGracefully(any(), eq(testPartition), anyInt()))
+      when(realIngestionBackend.dropStoragePartitionGracefully(any(), eq(testPartition), anyInt(), anyString()))
           .thenAnswer(invocation -> {
             // Simulate the actual deletion by calling factory.removeStorageEngine
             factory.removeStorageEngine(storeEngine);
@@ -444,7 +504,8 @@ public class LeaderFollowerPartitionStateModelTest {
           });
 
       when(realIngestionBackend.getStoreIngestionService()).thenReturn(mockIngestionService);
-      when(realIngestionBackend.stopConsumption(any(), anyInt())).thenReturn(CompletableFuture.completedFuture(null));
+      when(realIngestionBackend.stopConsumption(any(), anyInt(), anyString()))
+          .thenReturn(CompletableFuture.completedFuture(null));
 
       // Setup: Create state model with real backend
       VeniceStoreVersionConfig stateModelConfig = mock(VeniceStoreVersionConfig.class);

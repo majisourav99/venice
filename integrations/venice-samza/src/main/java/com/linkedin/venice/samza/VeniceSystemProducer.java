@@ -46,7 +46,6 @@ import com.linkedin.venice.serializer.FastSerializerDeserializerFactory;
 import com.linkedin.venice.serializer.RecordSerializer;
 import com.linkedin.venice.utils.Pair;
 import com.linkedin.venice.utils.PartitionUtils;
-import com.linkedin.venice.utils.SystemTime;
 import com.linkedin.venice.utils.Time;
 import com.linkedin.venice.utils.Utils;
 import com.linkedin.venice.utils.VeniceProperties;
@@ -55,6 +54,7 @@ import com.linkedin.venice.writer.AbstractVeniceWriter;
 import com.linkedin.venice.writer.CompletableFutureCallback;
 import com.linkedin.venice.writer.VeniceWriter;
 import com.linkedin.venice.writer.VeniceWriterFactory;
+import com.linkedin.venice.writer.VeniceWriterHook;
 import com.linkedin.venice.writer.VeniceWriterOptions;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -68,7 +68,6 @@ import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
-import org.antlr.v4.runtime.misc.NotNull;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
@@ -166,6 +165,7 @@ public class VeniceSystemProducer implements SystemProducer, Closeable {
   private Optional<String> routerUrl = Optional.empty();
 
   private AbstractVeniceWriter<byte[], byte[], byte[]> veniceWriter = null;
+  private final VeniceWriterHook writerHook;
   private Optional<RouterBasedPushMonitor> pushMonitor = Optional.empty();
   private Optional<RouterBasedHybridStoreQuotaMonitor> hybridStoreQuotaMonitor = Optional.empty();
 
@@ -174,207 +174,39 @@ public class VeniceSystemProducer implements SystemProducer, Closeable {
   private TransportClient transportClient;
   private RouterBasedHybridStoreQuotaMonitor.TransportClientReinitProvider reinitProvider;
 
-  /**
-   * Constructs a new instance of {@link VeniceSystemProducer}.
-   * <p>
-   * This constructor is equivalent to calling the full constructor with {@code SystemTime.INSTANCE} as the time provider.
-   *
-   * @param veniceChildD2ZkHost                 ZK host for the Venice child fabric.
-   * @param primaryControllerColoD2ZKHost       ZK host for the primary controller colo.
-   * @param primaryControllerD2ServiceName      D2 service name of the primary controller.
-   * @param storeName                           Name of the Venice store.
-   * @param pushType                            The push type (e.g., batch, stream).
-   * @param samzaJobId                          The Samza job ID.
-   * @param runningFabric                       The name of the current fabric.
-   * @param verifyLatestProtocolPresent         Whether to verify that the latest protocol is present.
-   * @param factory                             The system factory used to create producer components.
-   * @param sslFactory                          Optional SSL factory for secure communication.
-   * @param partitioners                        Optional partitioner class name(s) for custom partitioning.
-   */
-  public VeniceSystemProducer(
-      String veniceChildD2ZkHost,
-      String primaryControllerColoD2ZKHost,
-      String primaryControllerD2ServiceName,
-      String storeName,
-      Version.PushType pushType,
-      String samzaJobId,
-      String runningFabric,
-      boolean verifyLatestProtocolPresent,
-      VeniceSystemFactory factory,
-      Optional<SSLFactory> sslFactory,
-      Optional<String> partitioners) {
-    this(
-        veniceChildD2ZkHost,
-        primaryControllerColoD2ZKHost,
-        primaryControllerD2ServiceName,
-        storeName,
-        pushType,
-        samzaJobId,
-        runningFabric,
-        verifyLatestProtocolPresent,
-        factory,
-        sslFactory,
-        partitioners,
-        SystemTime.INSTANCE);
-  }
-
-  @Deprecated
-  public VeniceSystemProducer(
-      String primaryControllerColoD2ZKHost,
-      String primaryControllerD2ServiceName,
-      String storeName,
-      Version.PushType pushType,
-      String samzaJobId,
-      String runningFabric,
-      boolean verifyLatestProtocolPresent,
-      VeniceSystemFactory factory,
-      Optional<SSLFactory> sslFactory,
-      Optional<String> partitioners,
-      Time time) {
-    this(
-        primaryControllerColoD2ZKHost,
-        primaryControllerColoD2ZKHost,
-        primaryControllerD2ServiceName,
-        storeName,
-        pushType,
-        samzaJobId,
-        runningFabric,
-        verifyLatestProtocolPresent,
-        factory,
-        sslFactory,
-        partitioners,
-        time);
-  }
-
-  /**
-   * Construct a new instance of {@link VeniceSystemProducer}
-   * @param veniceChildD2ZkHost D2 Zk Address where the components in the child colo are announcing themselves
-   * @param primaryControllerColoD2ZKHost D2 Zk Address of the colo where the primary controller resides
-   * @param primaryControllerD2ServiceName The service name that the primary controller uses to announce itself to D2
-   * @param storeName The store to write to
-   * @param pushType The {@link Version.PushType} to use to write to the store
-   * @param samzaJobId A unique id used to identify jobs that can concurrently write to the same store
-   * @param runningFabric The colo where the job is running. It is used to find the best destination for the data to be written to
-   * @param verifyLatestProtocolPresent Config to check whether the protocol versions used at runtime are valid in Venice backend
-   * @param factory The {@link VeniceSystemFactory} object that was used to create this object
-   * @param sslFactory An optional {@link SSLFactory} that is used to communicate with other components using SSL
-   * @param partitioners A list of comma-separated partitioners class names that are supported.
-   * @param time An object of type {@link Time}. It is helpful to be configurable for testing.
-   */
-  public VeniceSystemProducer(
-      String veniceChildD2ZkHost,
-      String primaryControllerColoD2ZKHost,
-      String primaryControllerD2ServiceName,
-      String storeName,
-      Version.PushType pushType,
-      String samzaJobId,
-      String runningFabric,
-      boolean verifyLatestProtocolPresent,
-      VeniceSystemFactory factory,
-      Optional<SSLFactory> sslFactory,
-      Optional<String> partitioners,
-      Time time) {
-    this.veniceChildD2ZkHost = veniceChildD2ZkHost;
-    this.primaryControllerColoD2ZKHost = primaryControllerColoD2ZKHost;
-    this.primaryControllerD2ServiceName = primaryControllerD2ServiceName;
-    this.storeName = storeName;
-    this.pushType = pushType;
-    this.samzaJobId = samzaJobId;
-    this.runningFabric = runningFabric;
-    this.verifyLatestProtocolPresent = verifyLatestProtocolPresent;
-    this.factory = factory;
-    this.sslFactory = sslFactory;
-    this.partitioners = partitioners;
-    this.time = time;
-  }
-
-  /**
-   * Constructs a new instance of {@link VeniceSystemProducer} with D2Client instances.
-   * <p>
-   * This constructor accepts pre-configured D2Client instances.
-   *
-   * @param childColoD2Client                   D2Client for child colo. If null, will be created using veniceChildD2ZkHost.
-   * @param primaryControllerColoD2Client       D2Client for primary controller colo. If null, will be created using primaryControllerColoD2ZKHost.
-   * @param primaryControllerD2ServiceName      D2 service name of the primary controller.
-   * @param storeName                           Name of the Venice store.
-   * @param pushType                            The push type (e.g., batch, stream).
-   * @param samzaJobId                          The Samza job ID.
-   * @param runningFabric                       The name of the current fabric.
-   * @param verifyLatestProtocolPresent         Whether to verify that the latest protocol is present.
-   * @param factory                             The system factory used to create producer components.
-   * @param sslFactory                          Optional SSL factory for secure communication.
-   * @param partitioners                        Optional partitioner class name(s) for custom partitioning.
-   */
-  public VeniceSystemProducer(
-      @NotNull D2Client childColoD2Client,
-      @NotNull D2Client primaryControllerColoD2Client,
-      String primaryControllerD2ServiceName,
-      String storeName,
-      Version.PushType pushType,
-      String samzaJobId,
-      String runningFabric,
-      boolean verifyLatestProtocolPresent,
-      VeniceSystemFactory factory,
-      Optional<SSLFactory> sslFactory,
-      Optional<String> partitioners) {
-    this(
-        null,
-        null,
-        primaryControllerD2ServiceName,
-        storeName,
-        pushType,
-        samzaJobId,
-        runningFabric,
-        verifyLatestProtocolPresent,
-        factory,
-        sslFactory,
-        partitioners,
-        SystemTime.INSTANCE);
-    this.providedPrimaryControllerColoD2Client = Optional.ofNullable(primaryControllerColoD2Client);
-    this.providedChildColoD2Client = Optional.ofNullable(childColoD2Client);
-  }
-
-  public VeniceSystemProducer(
-      String discoveryUrl,
-      String storeName,
-      Version.PushType pushType,
-      String samzaJobId,
-      String runningFabric,
-      boolean verifyLatestProtocolPresent,
-      VeniceSystemFactory factory,
-      Optional<SSLFactory> sslFactory,
-      Optional<String> partitioners,
-      Time time) {
-
-    if (discoveryUrl == null || discoveryUrl.trim().isEmpty()) {
-      throw new IllegalStateException("Discovery URL is not present");
+  public VeniceSystemProducer(VeniceSystemProducerConfig config) {
+    this.storeName = config.getStoreName();
+    this.pushType = config.getPushType();
+    this.samzaJobId = config.getSamzaJobId();
+    this.runningFabric = config.getRunningFabric();
+    this.verifyLatestProtocolPresent = config.isVerifyLatestProtocolPresent();
+    this.factory = config.getFactory();
+    this.sslFactory = config.getSslFactory();
+    this.partitioners = config.getPartitioners();
+    this.time = config.getTime();
+    this.writerHook = config.getWriterHook();
+    if (config.getRouterUrl() != null) {
+      this.routerUrl = Optional.of(config.getRouterUrl());
+    }
+    if (config.getSamzaConfig() != null) {
+      this.additionalConfigs.putAll(config.getSamzaConfig());
     }
 
-    this.discoveryUrl = Optional.of(discoveryUrl);
-
-    this.veniceChildD2ZkHost = null;
-    this.primaryControllerColoD2ZKHost = null;
-    this.primaryControllerD2ServiceName = null;
-
-    this.storeName = storeName;
-    this.pushType = pushType;
-    this.samzaJobId = samzaJobId;
-    this.runningFabric = runningFabric;
-    this.verifyLatestProtocolPresent = verifyLatestProtocolPresent;
-    this.factory = factory;
-    this.sslFactory = sslFactory;
-    this.partitioners = partitioners;
-    this.time = time;
-    this.providedPrimaryControllerColoD2Client = Optional.empty();
-    this.providedChildColoD2Client = Optional.empty();
-  }
-
-  public void applyAdditionalConfigs(Map<String, String> additionalConfigs) {
-    this.additionalConfigs.putAll(additionalConfigs);
-  }
-
-  public void setRouterUrl(String routerUrl) {
-    this.routerUrl = Optional.of(routerUrl);
+    if (config.getDiscoveryUrl() != null) {
+      this.discoveryUrl = Optional.of(config.getDiscoveryUrl());
+      this.veniceChildD2ZkHost = null;
+      this.primaryControllerColoD2ZKHost = null;
+      this.primaryControllerD2ServiceName = null;
+      this.providedPrimaryControllerColoD2Client = Optional.empty();
+      this.providedChildColoD2Client = Optional.empty();
+    } else {
+      this.veniceChildD2ZkHost = config.getVeniceChildD2ZkHost();
+      this.primaryControllerColoD2ZKHost = config.getPrimaryControllerColoD2ZKHost();
+      this.primaryControllerD2ServiceName = config.getPrimaryControllerD2ServiceName();
+      this.providedPrimaryControllerColoD2Client =
+          Optional.ofNullable(config.getProvidedPrimaryControllerColoD2Client());
+      this.providedChildColoD2Client = Optional.ofNullable(config.getProvidedChildColoD2Client());
+    }
   }
 
   public String getRunningFabric() {
@@ -477,7 +309,8 @@ public class VeniceSystemProducer implements SystemProducer, Closeable {
             Integer.parseInt(
                 veniceWriterProperties.getProperty(ConfigKeys.WRITER_BATCHING_MAX_BUFFER_SIZE_IN_BYTES, "5242880")))
         .setStoreSchemaFetcher(schemaFetcher)
-        .setChunkingEnabled(isChunkingEnabled);
+        .setChunkingEnabled(isChunkingEnabled)
+        .setWriterHook(writerHook);
     extractConcurrentProducerConfig(veniceWriterProperties, builder);
     return constructVeniceWriter(veniceWriterProperties, builder.build());
   }
@@ -798,6 +631,21 @@ public class VeniceSystemProducer implements SystemProducer, Closeable {
     send(outgoingMessageEnvelope.getKey(), outgoingMessageEnvelope.getMessage());
   }
 
+  /**
+   * Validates, serializes, and writes a key-value pair to Venice.
+   *
+   * This method handles the full write lifecycle: key schema validation, key/value serialization,
+   * schema ID resolution, write-compute conversion for versioned topics, and dispatch to the
+   * underlying {@link VeniceWriter} (put, delete, or update).
+   *
+   * For real-time topics, the value may be wrapped in a {@link VeniceObjectWithTimestamp} to
+   * supply a logical timestamp.
+   *
+   * @param keyObject the key object; must conform to the store's registered key schema
+   * @param valueObject the value object, or {@code null} for a delete. For real-time topics,
+   *                    may be a {@link VeniceObjectWithTimestamp} wrapping the value with a timestamp.
+   * @return a {@link CompletableFuture} that completes when the write is acknowledged
+   */
   protected CompletableFuture<Void> send(Object keyObject, Object valueObject) {
     Schema keyObjectSchema = getSchemaFromObject(keyObject);
     String canonicalSchemaStr = canonicalSchemaStrCache.get(keyObjectSchema);
@@ -808,8 +656,7 @@ public class VeniceSystemProducer implements SystemProducer, Closeable {
               + " which does not match Venice key schema " + canonicalKeySchemaStr + ".");
     }
 
-    byte[] key = serializeObject(keyObject);
-    final CompletableFuture<Void> completableFuture = new CompletableFuture<>();
+    byte[] serializedKey = serializeObject(keyObject);
 
     long logicalTimestamp = VeniceWriter.APP_DEFAULT_LOGICAL_TS;
     // Only transmit the timestamp if this is a realtime topic.
@@ -824,52 +671,56 @@ public class VeniceSystemProducer implements SystemProducer, Closeable {
       valueObject = objectWithTimestamp.getObject();
     }
 
+    final CompletableFuture<Void> completableFuture = new CompletableFuture<>();
+
     if (valueObject == null) {
-      getInternalWriter().delete(key, logicalTimestamp, new CompletableFutureCallback(completableFuture));
+      getInternalWriter().delete(serializedKey, logicalTimestamp, new CompletableFutureCallback(completableFuture));
+      return completableFuture;
+    }
+
+    Schema valueObjectSchema = getSchemaFromObject(valueObject);
+
+    Pair<Integer, Integer> valueSchemaIdPair = valueSchemaToIdsMap.computeIfAbsent(valueObjectSchema, valueSchema -> {
+      SchemaResponse valueSchemaResponse = (SchemaResponse) controllerRequestWithRetry(
+          () -> controllerClient.getValueOrDerivedSchemaId(storeName, valueSchema.toString()),
+          2);
+      LOGGER.info("Got [store: {}] SchemaResponse for schema: {}", storeName, valueSchema);
+      return new Pair<>(valueSchemaResponse.getId(), valueSchemaResponse.getDerivedSchemaId());
+    });
+
+    if (Version.isATopicThatIsVersioned(topicName) && valueSchemaIdPair.getSecond() != -1) {
+      // This is a write compute request getting published to a version topic or reprocessing topic. We don't
+      // support partial records in the Venice version topic, so we will convert this request
+      // to a full put with default fields applied
+      int baseSchemaId = valueSchemaIdPair.getFirst();
+      valueObject = convertPartialUpdateToFullPut(valueSchemaIdPair, valueObject);
+      valueSchemaIdPair = new Pair<>(baseSchemaId, -1);
+    }
+
+    byte[] serializedValue = serializeObject(valueObject);
+    int valueSchemaId = valueSchemaIdPair.getFirst();
+    int derivedSchemaId = valueSchemaIdPair.getSecond();
+
+    if (derivedSchemaId == -1) {
+      getInternalWriter().put(
+          serializedKey,
+          serializedValue,
+          valueSchemaId,
+          logicalTimestamp,
+          new CompletableFutureCallback(completableFuture));
     } else {
-      Schema valueObjectSchema = getSchemaFromObject(valueObject);
-
-      Pair<Integer, Integer> valueSchemaIdPair = valueSchemaToIdsMap.computeIfAbsent(valueObjectSchema, valueSchema -> {
-        SchemaResponse valueSchemaResponse = (SchemaResponse) controllerRequestWithRetry(
-            () -> controllerClient.getValueOrDerivedSchemaId(storeName, valueSchema.toString()),
-            2);
-        LOGGER.info("Got [store: {}] SchemaResponse for schema: {}", storeName, valueSchema);
-        return new Pair<>(valueSchemaResponse.getId(), valueSchemaResponse.getDerivedSchemaId());
-      });
-
-      if (Version.isATopicThatIsVersioned(topicName) && valueSchemaIdPair.getSecond() != -1) {
-        // This is a write compute request getting published to a version topic or reprocessing topic. We don't
-        // support partial records in the Venice version topic, so we will convert this request
-        // to a full put with default fields applied
-
-        int baseSchemaId = valueSchemaIdPair.getFirst();
-        valueObject = convertPartialUpdateToFullPut(valueSchemaIdPair, valueObject);
-        valueSchemaIdPair = new Pair<>(baseSchemaId, -1);
+      if (!isWriteComputeEnabled) {
+        throw new SamzaException(
+            "Cannot write partial update record to Venice store " + storeName + " "
+                + "because write-compute is not enabled for it. Please contact Venice team to configure it.");
       }
-
-      byte[] value = serializeObject(valueObject);
-
-      if (valueSchemaIdPair.getSecond() == -1) {
-        getInternalWriter().put(
-            key,
-            value,
-            valueSchemaIdPair.getFirst(),
-            logicalTimestamp,
-            new CompletableFutureCallback(completableFuture));
-      } else {
-        if (!isWriteComputeEnabled) {
-          throw new SamzaException(
-              "Cannot write partial update record to Venice store " + storeName + " "
-                  + "because write-compute is not enabled for it. Please contact Venice team to configure it.");
-        }
-        getInternalWriter().update(
-            key,
-            value,
-            valueSchemaIdPair.getFirst(),
-            valueSchemaIdPair.getSecond(),
-            logicalTimestamp,
-            new CompletableFutureCallback(completableFuture));
-      }
+      getInternalWriter().update(
+          serializedKey,
+          serializedValue,
+          valueSchemaId,
+          derivedSchemaId,
+          logicalTimestamp,
+          new CompletableFutureCallback(completableFuture));
     }
     return completableFuture;
   }
