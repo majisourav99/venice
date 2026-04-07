@@ -2,12 +2,9 @@ package com.linkedin.davinci.kafka.consumer;
 
 import static java.util.concurrent.TimeUnit.MINUTES;
 
-import com.linkedin.davinci.compression.KeyUrnCompressor;
-import com.linkedin.davinci.compression.UrnDictV1;
 import com.linkedin.davinci.helix.LeaderFollowerPartitionStateModel;
 import com.linkedin.davinci.stats.ingestion.heartbeat.HeartbeatKey;
 import com.linkedin.davinci.utils.ByteArrayKey;
-import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.kafka.protocol.GUID;
 import com.linkedin.venice.kafka.protocol.Put;
 import com.linkedin.venice.kafka.protocol.TopicSwitch;
@@ -23,7 +20,6 @@ import com.linkedin.venice.pubsub.api.PubSubSymbolicPosition;
 import com.linkedin.venice.pubsub.api.PubSubTopic;
 import com.linkedin.venice.pubsub.api.PubSubTopicPartition;
 import com.linkedin.venice.serialization.avro.AvroProtocolDefinition;
-import com.linkedin.venice.server.state.KeyUrnCompressionDict;
 import com.linkedin.venice.storage.protocol.ChunkedValueManifest;
 import com.linkedin.venice.utils.LatencyUtils;
 import com.linkedin.venice.utils.concurrent.VeniceConcurrentHashMap;
@@ -40,8 +36,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
-import java.util.stream.Collectors;
-import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.util.Utf8;
 import org.apache.logging.log4j.LogManager;
@@ -293,8 +287,6 @@ public class PartitionConsumptionState {
 
   private long readyToServeTimeLagThresholdInMs = DEFAULT_HEARTBEAT_LAG_THRESHOLD_MS;
 
-  private final Schema keySchema;
-  private KeyUrnCompressor keyUrnCompressor;
   private Map<String, IncrementalPushReplicaStatus> trackingIncrementalPushStatus;
   /**
    * Indicates whether a bootstrapping current version replica has resubscribed after bootstrap completed.
@@ -303,17 +295,43 @@ public class PartitionConsumptionState {
   private boolean hasResubscribedAfterBootstrapAsCurrentVersion;
 
   /**
+   * Tracks an in-progress blob transfer for this partition. When non-null, blob transfer is in progress
+   * and Kafka subscribe has not yet happened. The SIT main loop's checkLongRunningTaskState() will poll
+   * this future for completion and then perform Kafka subscribe.
+   *
+   * Set during SUBSCRIBE action processing when blob transfer is needed.
+   * Cleared when blob transfer completes (success or failure) or when UNSUBSCRIBE cancels it.
+   */
+  private volatile CompletableFuture<Void> pendingBlobTransfer;
+
+  /**
+   * Tracks an in-progress record transformer recovery after blob transfer completes.
+   * Set when blob transfer finishes and record transformer recovery is submitted to the thread pool.
+   * Cleared when record transformer recovery completes and Kafka subscribe proceeds.
+   */
+  private volatile CompletableFuture<Void> pendingRecordTransformerRecovery;
+
+  /**
+   * The original consumer action that triggered the record transformer recovery, if any.
+   * Stored so that checkLongRunningTaskState can pass it to validateAndSubscribePartition
+   * when the record transformer future completes. Null for the post-blob-transfer path.
+   */
+  private volatile ConsumerAction postRecordTransformerConsumerAction;
+
+  /**
    * Cached HeartbeatKey references keyed by region, populated during lag monitor setup.
    * Eliminates HeartbeatKey creation and hash computation on the per-record recording path.
    */
   private final Map<String, HeartbeatKey> cachedHeartbeatKeys;
 
+  /** Lazily allocated per-partition detector for partial-update amplification. */
+  private volatile PartialUpdateAmplificationDetector partialUpdateAmplificationDetector;
+
   public PartitionConsumptionState(
       PubSubTopicPartition partitionReplica,
       OffsetRecord offsetRecord,
       PubSubContext pubSubContext,
-      boolean hybrid,
-      Schema keySchema) {
+      boolean hybrid) {
     LOGGER.info("Creating PCS for replica: {}", partitionReplica);
 
     this.partitionReplica = Objects.requireNonNull(partitionReplica, "TopicPartition cannot be null when creating PCS");
@@ -323,7 +341,6 @@ public class PartitionConsumptionState {
               + partitionReplica.getTopicName());
     }
     this.hybrid = hybrid;
-    this.keySchema = keySchema;
     this.offsetRecord = offsetRecord;
     this.pubSubContext = pubSubContext;
     this.errorReported = false;
@@ -374,19 +391,6 @@ public class PartitionConsumptionState {
     this.lastLeaderCompleteStateUpdateInMs = 0;
     this.pendingReportIncPushVersionList = offsetRecord.getPendingReportIncPushVersionList();
     this.hasResubscribedAfterBootstrapAsCurrentVersion = false;
-    KeyUrnCompressionDict keyUrnCompressionDict = offsetRecord.getKeyUrnCompressionDict();
-    if (keyUrnCompressionDict != null) {
-      if (keyUrnCompressionDict.keyUrnCompressionDictionaryVersion != 1) {
-        throw new VeniceException(
-            "Unsupported key urn compression dictionary version: "
-                + keyUrnCompressionDict.keyUrnCompressionDictionaryVersion);
-      }
-      UrnDictV1 urnDictV1 = UrnDictV1.loadDict(keyUrnCompressionDict.keyUrnCompressionDictionary);
-      this.keyUrnCompressor = new KeyUrnCompressor(
-          keySchema,
-          keyUrnCompressionDict.keyUrnFields.stream().map(Object::toString).collect(Collectors.toList()),
-          urnDictV1);
-    }
   }
 
   public int getPartition() {
@@ -403,6 +407,38 @@ public class PartitionConsumptionState {
 
   public void setCurrentVersionSupplier(BooleanSupplier isCurrentVersion) {
     this.isCurrentVersion = isCurrentVersion;
+  }
+
+  public CompletableFuture<Void> getPendingBlobTransfer() {
+    return this.pendingBlobTransfer;
+  }
+
+  public void setPendingBlobTransfer(CompletableFuture<Void> pendingBlobTransfer) {
+    this.pendingBlobTransfer = pendingBlobTransfer;
+  }
+
+  public boolean isBlobTransferInProgress() {
+    return this.pendingBlobTransfer != null;
+  }
+
+  public CompletableFuture<Void> getPendingRecordTransformerRecovery() {
+    return this.pendingRecordTransformerRecovery;
+  }
+
+  public void setPendingRecordTransformerRecovery(CompletableFuture<Void> pendingRecordTransformerRecovery) {
+    this.pendingRecordTransformerRecovery = pendingRecordTransformerRecovery;
+  }
+
+  public boolean isRecordTransformerRecoveryInProgress() {
+    return this.pendingRecordTransformerRecovery != null;
+  }
+
+  public ConsumerAction getPostRecordTransformerConsumerAction() {
+    return this.postRecordTransformerConsumerAction;
+  }
+
+  public void setPostRecordTransformerConsumerAction(ConsumerAction postRecordTransformerConsumerAction) {
+    this.postRecordTransformerConsumerAction = postRecordTransformerConsumerAction;
   }
 
   public OffsetRecord getOffsetRecord() {
@@ -1128,33 +1164,6 @@ public class PartitionConsumptionState {
     this.readyToServeTimeLagThresholdInMs = readyToServeTimeLagThresholdInMs;
   }
 
-  public void enableKeyUrnCompressionUponStartOfPush(List<String> keyUrnFields) {
-    if (keyUrnCompressor == null) {
-      LOGGER.info(
-          "Enabling key urn compression for replicaId: {} with fields: {}",
-          getReplicaTopicPartition(),
-          keyUrnFields);
-    } else {
-      LOGGER.info("Previous key urn compression dict will be overridden for replicaId: {}", getReplicaTopicPartition());
-    }
-    this.keyUrnCompressor = new KeyUrnCompressor(keySchema, keyUrnFields, UrnDictV1.loadDict(Collections.emptyMap()));
-  }
-
-  public KeyUrnCompressionDict getKeyUrnCompressionDict() {
-    if (keyUrnCompressor == null) {
-      return null;
-    }
-    KeyUrnCompressionDict dict = new KeyUrnCompressionDict();
-    dict.keyUrnCompressionDictionaryVersion = 1;
-    dict.keyUrnFields = keyUrnCompressor.getUrnFieldNames().stream().map(Object::toString).collect(Collectors.toList());
-    dict.keyUrnCompressionDictionary = ByteBuffer.wrap(keyUrnCompressor.getUrnDict().serializeDict());
-    return dict;
-  }
-
-  public KeyUrnCompressor getKeyDictCompressor() {
-    return keyUrnCompressor;
-  }
-
   public Map<String, IncrementalPushReplicaStatus> getTrackingIncrementalPushStatus() {
     return trackingIncrementalPushStatus;
   }
@@ -1205,5 +1214,21 @@ public class PartitionConsumptionState {
       int version = Version.parseVersionFromKafkaTopicName(topicName);
       return new HeartbeatKey(storeName, version, getPartition(), r);
     });
+  }
+
+  /**
+   * Get or create the per-partition partial-update amplification detector. Lazily allocated using
+   * double-checked locking — only partitions that actually receive partial-update events will allocate.
+   * The {@code reportIntervalMs} is only used on first creation; subsequent calls return the existing detector.
+   */
+  public PartialUpdateAmplificationDetector getOrCreatePartialUpdateAmplificationDetector(long reportIntervalMs) {
+    if (partialUpdateAmplificationDetector == null) {
+      synchronized (this) {
+        if (partialUpdateAmplificationDetector == null) {
+          partialUpdateAmplificationDetector = new PartialUpdateAmplificationDetector(reportIntervalMs);
+        }
+      }
+    }
+    return partialUpdateAmplificationDetector;
   }
 }

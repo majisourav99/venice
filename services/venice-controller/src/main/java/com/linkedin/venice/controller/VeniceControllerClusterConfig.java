@@ -35,6 +35,7 @@ import static com.linkedin.venice.ConfigKeys.CONTROLLER_AUTO_MATERIALIZE_META_SY
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_BACKUP_VERSION_DEFAULT_RETENTION_MS;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_BACKUP_VERSION_DELETION_SLEEP_MS;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_BACKUP_VERSION_METADATA_FETCH_BASED_CLEANUP_ENABLED;
+import static com.linkedin.venice.ConfigKeys.CONTROLLER_BACKUP_VERSION_MIN_CLEANUP_DELAY_MS;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_BACKUP_VERSION_REPLICA_REDUCTION_ENABLED;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_BACKUP_VERSION_RETENTION_BASED_CLEANUP_ENABLED;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_CLUSTER;
@@ -86,13 +87,15 @@ import static com.linkedin.venice.ConfigKeys.CONTROLLER_PARENT_SYSTEM_STORE_REPA
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PARENT_SYSTEM_STORE_VERSION_REFRESH_THRESHOLD_IN_DAYS;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PROTOCOL_VERSION_AUTO_DETECTION_SERVICE_ENABLED;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PROTOCOL_VERSION_AUTO_DETECTION_SLEEP_MS;
+import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_ALL;
+import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_BATCH_USER_STORE_VT;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_EXCLUSION_LIST;
+import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_HYBRID_USER_STORE_RT;
+import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_HYBRID_USER_STORE_VT;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_META_SYSTEM_STORE_RT;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_META_SYSTEM_STORE_VT;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_PUSH_STATUS_SYSTEM_STORE_RT;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_PUSH_STATUS_SYSTEM_STORE_VT;
-import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_USER_STORE_RT;
-import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_USER_STORE_VT;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_REPUSH_PREFIX;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_RESOURCE_INSTANCE_GROUP_TAG;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_SCHEMA_VALIDATION_ENABLED;
@@ -189,6 +192,7 @@ import static com.linkedin.venice.ConfigKeys.PARENT_KAFKA_CLUSTER_FABRIC_LIST;
 import static com.linkedin.venice.ConfigKeys.PARTICIPANT_MESSAGE_STORE_ENABLED;
 import static com.linkedin.venice.ConfigKeys.PARTITION_COUNT_ROUND_UP_SIZE;
 import static com.linkedin.venice.ConfigKeys.PERSISTENCE_TYPE;
+import static com.linkedin.venice.ConfigKeys.PUBSUB_PRODUCER_TIMESTAMP_FALLBACK_ENABLED;
 import static com.linkedin.venice.ConfigKeys.PUBSUB_TOPIC_MANAGER_METADATA_FETCHER_CONSUMER_POOL_SIZE;
 import static com.linkedin.venice.ConfigKeys.PUBSUB_TOPIC_MANAGER_METADATA_FETCHER_THREAD_POOL_SIZE;
 import static com.linkedin.venice.ConfigKeys.PUSH_JOB_FAILURE_CHECKPOINTS_TO_DEFINE_USER_ERROR;
@@ -263,6 +267,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -351,6 +356,7 @@ public class VeniceControllerClusterConfig {
   private final long errorPartitionProcessingCycleDelay;
   private final long backupVersionDefaultRetentionMs;
   private final long backupVersionCleanupSleepMs;
+  private final long backupVersionMinCleanupDelayMs;
 
   private final boolean backupVersionRetentionBasedCleanupEnabled;
   private final boolean backupVersionMetadataFetchBasedCleanupEnabled;
@@ -476,6 +482,7 @@ public class VeniceControllerClusterConfig {
   private final boolean systemSchemaInitializationAtStartTimeEnabled;
 
   private final boolean isKMERegistrationFromMessageHeaderEnabled;
+  private final boolean producerTimestampFallbackEnabled;
   private final boolean unusedValueSchemaCleanupServiceEnabled;
 
   private final int unusedSchemaCleanupIntervalSeconds;
@@ -701,12 +708,30 @@ public class VeniceControllerClusterConfig {
   private final int systemStoreVersionRetentionCount;
 
   // --- Alternative PubSub backend configs ---
-  private final boolean alternativeBackendMetaSystemStoreVT;
-  private final boolean alternativeBackendMetaSystemStoreRT;
-  private final boolean alternativeBackendPushStatusSystemStoreVT;
-  private final boolean alternativeBackendPushStatusSystemStoreRT;
-  private final boolean alternativeBackendUserStoreVT;
-  private final boolean alternativeBackendUserStoreRT;
+
+  /**
+   * Granular flags controlling which topic types are created on the alternative PubSub backend.
+   * Each value maps 1:1 to a config key and is read into an EnumMap at construction time.
+   * Adding a new topic type requires: (1) a new enum constant here, and (2) a routing case in
+   * {@link #resolveAlternativePubSubBackendTopic}.
+   */
+  enum AlternativePubSubBackendTopic {
+    META_STORE_VT(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_META_SYSTEM_STORE_VT),
+    META_STORE_RT(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_META_SYSTEM_STORE_RT),
+    PUSH_STATUS_STORE_VT(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_PUSH_STATUS_SYSTEM_STORE_VT),
+    PUSH_STATUS_STORE_RT(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_PUSH_STATUS_SYSTEM_STORE_RT),
+    BATCH_USER_STORE_VT(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_BATCH_USER_STORE_VT),
+    HYBRID_USER_STORE_VT(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_HYBRID_USER_STORE_VT),
+    HYBRID_USER_STORE_RT(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_HYBRID_USER_STORE_RT);
+
+    private final String configKey;
+
+    AlternativePubSubBackendTopic(String configKey) {
+      this.configKey = configKey;
+    }
+  }
+
+  private final EnumMap<AlternativePubSubBackendTopic, Boolean> alternativePubSubBackendEnabled;
   private final Set<String> alternativeBackendExclusionList;
 
   public VeniceControllerClusterConfig(VeniceProperties props) {
@@ -1043,6 +1068,8 @@ public class VeniceControllerClusterConfig {
         props.getLong(CONTROLLER_BACKUP_VERSION_DELETION_SLEEP_MS, TimeUnit.MINUTES.toMillis(5));
     this.backupVersionDefaultRetentionMs =
         props.getLong(CONTROLLER_BACKUP_VERSION_DEFAULT_RETENTION_MS, TimeUnit.DAYS.toMillis(7)); // 1 week
+    this.backupVersionMinCleanupDelayMs =
+        props.getLong(CONTROLLER_BACKUP_VERSION_MIN_CLEANUP_DELAY_MS, TimeUnit.HOURS.toMillis(1));
     this.backupVersionRetentionBasedCleanupEnabled =
         props.getBoolean(CONTROLLER_BACKUP_VERSION_RETENTION_BASED_CLEANUP_ENABLED, false);
     this.backupVersionMetadataFetchBasedCleanupEnabled =
@@ -1169,6 +1196,7 @@ public class VeniceControllerClusterConfig {
         props.getBoolean(SYSTEM_SCHEMA_INITIALIZATION_AT_START_TIME_ENABLED, false);
     this.isKMERegistrationFromMessageHeaderEnabled =
         props.getBoolean(KME_REGISTRATION_FROM_MESSAGE_HEADER_ENABLED, false);
+    this.producerTimestampFallbackEnabled = props.getBoolean(PUBSUB_PRODUCER_TIMESTAMP_FALLBACK_ENABLED, true);
     this.enableDisabledReplicaEnabled = props.getBoolean(CONTROLLER_ENABLE_DISABLED_REPLICA_ENABLED, false);
 
     this.unusedValueSchemaCleanupServiceEnabled =
@@ -1324,16 +1352,12 @@ public class VeniceControllerClusterConfig {
         props.getInt(SYSTEM_STORE_VERSION_RETENTION_COUNT, DEFAULT_SYSTEM_STORE_VERSION_RETENTION_COUNT);
 
     // Alternative PubSub backend configs
-    this.alternativeBackendMetaSystemStoreVT =
-        props.getBoolean(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_META_SYSTEM_STORE_VT, false);
-    this.alternativeBackendMetaSystemStoreRT =
-        props.getBoolean(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_META_SYSTEM_STORE_RT, false);
-    this.alternativeBackendPushStatusSystemStoreVT =
-        props.getBoolean(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_PUSH_STATUS_SYSTEM_STORE_VT, false);
-    this.alternativeBackendPushStatusSystemStoreRT =
-        props.getBoolean(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_PUSH_STATUS_SYSTEM_STORE_RT, false);
-    this.alternativeBackendUserStoreVT = props.getBoolean(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_USER_STORE_VT, false);
-    this.alternativeBackendUserStoreRT = props.getBoolean(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_USER_STORE_RT, false);
+    boolean enableAll = props.getBoolean(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_ALL, false);
+    EnumMap<AlternativePubSubBackendTopic, Boolean> flags = new EnumMap<>(AlternativePubSubBackendTopic.class);
+    for (AlternativePubSubBackendTopic topic: AlternativePubSubBackendTopic.values()) {
+      flags.put(topic, props.getBoolean(topic.configKey, enableAll));
+    }
+    this.alternativePubSubBackendEnabled = flags;
     String exclusionListStr = props.getString(CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_EXCLUSION_LIST, "");
     this.alternativeBackendExclusionList = exclusionListStr.isEmpty()
         ? Collections.emptySet()
@@ -1363,21 +1387,45 @@ public class VeniceControllerClusterConfig {
 
   /**
    * Whether to use alternative pubsub backend for this store/topic combination.
-   * Checks the exact store name against the exclusion list, then looks up the appropriate flag
-   * based on system store type and topic type (RT vs VT). Excluding a user store does not
-   * affect its system stores; each must be excluded independently if needed.
+   * Checks the exact store name against the exclusion list, then resolves the appropriate
+   * {@link AlternativePubSubBackendTopic} flag via {@link #resolveAlternativePubSubBackendTopic}.
+   * Excluding a user store does not affect its system stores; each must be excluded independently.
+   *
+   * <p>For user store VTs, {@code isHybridStore} selects between {@link AlternativePubSubBackendTopic#BATCH_USER_STORE_VT}
+   * and {@link AlternativePubSubBackendTopic#HYBRID_USER_STORE_VT}. It is ignored for RT topics and system stores.
    */
-  public boolean shouldUseAlternativePubSubBackend(String storeName, boolean isRealTime) {
+  public boolean shouldUseAlternativePubSubBackend(String storeName, boolean isRealTime, boolean isHybridStore) {
     if (alternativeBackendExclusionList.contains(storeName)) {
       return false;
     }
+    return alternativePubSubBackendEnabled
+        .get(resolveAlternativePubSubBackendTopic(storeName, isRealTime, isHybridStore));
+  }
+
+  private AlternativePubSubBackendTopic resolveAlternativePubSubBackendTopic(
+      String storeName,
+      boolean isRealTime,
+      boolean isHybridStore) {
     VeniceSystemStoreType systemStoreType = VeniceSystemStoreType.getSystemStoreType(storeName);
     if (systemStoreType == VeniceSystemStoreType.META_STORE) {
-      return isRealTime ? alternativeBackendMetaSystemStoreRT : alternativeBackendMetaSystemStoreVT;
+      return isRealTime ? AlternativePubSubBackendTopic.META_STORE_RT : AlternativePubSubBackendTopic.META_STORE_VT;
     } else if (systemStoreType == VeniceSystemStoreType.DAVINCI_PUSH_STATUS_STORE) {
-      return isRealTime ? alternativeBackendPushStatusSystemStoreRT : alternativeBackendPushStatusSystemStoreVT;
+      return isRealTime
+          ? AlternativePubSubBackendTopic.PUSH_STATUS_STORE_RT
+          : AlternativePubSubBackendTopic.PUSH_STATUS_STORE_VT;
     }
-    return isRealTime ? alternativeBackendUserStoreRT : alternativeBackendUserStoreVT;
+    if (isRealTime) {
+      return AlternativePubSubBackendTopic.HYBRID_USER_STORE_RT;
+    }
+    return isHybridStore
+        ? AlternativePubSubBackendTopic.HYBRID_USER_STORE_VT
+        : AlternativePubSubBackendTopic.BATCH_USER_STORE_VT;
+  }
+
+  /** @deprecated use {@link #shouldUseAlternativePubSubBackend(String, boolean, boolean)} */
+  @Deprecated
+  public boolean shouldUseAlternativePubSubBackend(String storeName, boolean isRealTime) {
+    return shouldUseAlternativePubSubBackend(storeName, isRealTime, false);
   }
 
   public VeniceProperties getProps() {
@@ -1888,6 +1936,10 @@ public class VeniceControllerClusterConfig {
     return backupVersionCleanupSleepMs;
   }
 
+  public long getBackupVersionMinCleanupDelayMs() {
+    return backupVersionMinCleanupDelayMs;
+  }
+
   public boolean isBackupVersionRetentionBasedCleanupEnabled() {
     return backupVersionRetentionBasedCleanupEnabled;
   }
@@ -2156,6 +2208,10 @@ public class VeniceControllerClusterConfig {
 
   public boolean isKMERegistrationFromMessageHeaderEnabled() {
     return isKMERegistrationFromMessageHeaderEnabled;
+  }
+
+  public boolean isProducerTimestampFallbackEnabled() {
+    return producerTimestampFallbackEnabled;
   }
 
   public PubSubClientsFactory getPubSubClientsFactory() {

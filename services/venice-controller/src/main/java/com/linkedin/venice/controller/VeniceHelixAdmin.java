@@ -471,8 +471,6 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
 
   private final long backupVersionDefaultRetentionMs;
 
-  private final int defaultMaxRecordSizeBytes;
-
   private final DataRecoveryManager dataRecoveryManager;
   private CompactionManager compactionManager;
   private final ParticipantStoreClientsManager participantStoreClientsManager;
@@ -554,7 +552,6 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
     this.fatalDataValidationFailureRetentionMs = multiClusterConfigs.getFatalDataValidationFailureRetentionMs();
     this.deprecatedJobTopicMaxRetentionMs = multiClusterConfigs.getDeprecatedJobTopicMaxRetentionMs();
     this.backupVersionDefaultRetentionMs = multiClusterConfigs.getBackupVersionDefaultRetentionMs();
-    this.defaultMaxRecordSizeBytes = multiClusterConfigs.getDefaultMaxRecordSizeBytes();
     this.minNumberOfStoreVersionsToPreserve = multiClusterConfigs.getMinNumberOfStoreVersionsToPreserve();
     this.authorizerService = authorizerService;
     this.d2Client = d2Client;
@@ -3024,7 +3021,8 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
           .getTopic(Version.composeStreamReprocessingTopic(version.getStoreName(), version.getNumber()));
       topicNamesToCreate.add(streamReprocessingTopic);
     }
-    boolean useAltBackend = clusterConfig.shouldUseAlternativePubSubBackend(version.getStoreName(), false);
+    boolean useAltBackend =
+        clusterConfig.shouldUseAlternativePubSubBackend(version.getStoreName(), false, version.isHybrid());
     topicNamesToCreate.forEach(
         topicNameToCreate -> topicManager.createTopic(
             topicNameToCreate,
@@ -3201,6 +3199,14 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
           }
           if (systemStoreType != null && systemStoreType.equals(VeniceSystemStoreType.DAVINCI_PUSH_STATUS_STORE)) {
             setUpDaVinciPushStatusStore(clusterName, systemStoreType.extractRegularStoreName(storeName));
+          }
+
+          if (systemStoreType != null && (versionSwapDeferred && StringUtils.isNotEmpty(targetedRegions))) {
+            LOGGER.warn(
+                "Target region push with deferred swap is not supported for system store {}. Ignoring versionSwapDeferred and targetedRegions configs.",
+                storeName);
+            versionSwapDeferred = false;
+            targetedRegions = null;
           }
 
           Store store = repository.getStore(storeName);
@@ -3642,7 +3648,7 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
           // Note: do not enable RT compaction! Might make jobs in Online/Offline model stuck
           clusterConfig.getMinInSyncReplicasRealTimeTopics(),
           false,
-          clusterConfig.shouldUseAlternativePubSubBackend(store.getName(), true),
+          clusterConfig.shouldUseAlternativePubSubBackend(store.getName(), true, store.isHybrid()),
           clusterConfig.getUncleanLeaderElectionEnableRealTimeTopics());
     }
     LOGGER.info(
@@ -5932,8 +5938,6 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
     Optional<Boolean> ttlRepushEnabled = params.isTTLRepushEnabled();
     Optional<Boolean> enumSchemaEvolutionAllowed = params.isEnumSchemaEvolutionAllowed();
     Optional<List<LifecycleHooksRecord>> storeLifecycleHooks = params.getStoreLifecycleHooks();
-    Optional<Boolean> keyUrnCompressionEnabled = params.getKeyUrnCompressionEnabled();
-    Optional<List<String>> keyUrnFields = params.getKeyUrnFields();
     Optional<Boolean> flinkVeniceViewsEnabled = params.getFlinkVeniceViewsEnabled();
     Optional<Integer> previousCurrentVersion = params.getPreviousCurrentVersion();
 
@@ -6333,16 +6337,6 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
 
       enumSchemaEvolutionAllowed.ifPresent(aBool -> storeMetadataUpdate(clusterName, storeName, (store, resources) -> {
         store.setEnumSchemaEvolutionAllowed(aBool);
-        return store;
-      }));
-
-      keyUrnCompressionEnabled.ifPresent(aBool -> storeMetadataUpdate(clusterName, storeName, (store, resources) -> {
-        store.setKeyUrnCompressionEnabled(aBool);
-        return store;
-      }));
-
-      keyUrnFields.ifPresent(fields -> storeMetadataUpdate(clusterName, storeName, (store, resources) -> {
-        store.setKeyUrnFields(fields);
         return store;
       }));
 
@@ -9626,10 +9620,10 @@ public class VeniceHelixAdmin implements Admin, StoreCleaner {
     return backupVersionDefaultRetentionMs;
   }
 
-  /** @see Admin#getDefaultMaxRecordSizeBytes() */
+  /** @see Admin#getDefaultMaxRecordSizeBytes(String) */
   @Override
-  public int getDefaultMaxRecordSizeBytes() {
-    return defaultMaxRecordSizeBytes;
+  public int getDefaultMaxRecordSizeBytes(String clusterName) {
+    return multiClusterConfigs.getDefaultMaxRecordSizeBytes(clusterName);
   }
 
   private Pair<NodeReplicasReadinessState, List<Replica>> areAllCurrentVersionReplicasReady(

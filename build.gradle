@@ -327,7 +327,8 @@ subprojects {
       // when actually using the new protocol. Example to pin KME to v12 when introducing v13:
       // project(':internal:venice-common').file('src/main/resources/avro/KafkaMessageEnvelope/v12', PathValidation.DIRECTORY)
       def versionOverrides = [
-        project(':internal:venice-common').file('src/main/resources/avro/StoreMetaValue/v40', PathValidation.DIRECTORY)
+        project(':internal:venice-common').file('src/main/resources/avro/StoreMetaValue/v40', PathValidation.DIRECTORY),
+        project(':services:venice-controller').file('src/main/resources/avro/AdminOperation/v95', PathValidation.DIRECTORY)
       ]
 
       def schemaDirs = [sourceDir]
@@ -642,7 +643,7 @@ spotless {
   }
   format 'markdown', {
     target '**/*.md'
-    targetExclude '**/build/**', '**/target/**', '**/.gradle/**'
+    targetExclude '**/build/**', '**/target/**', '**/.gradle/**', 'tests/venice-feature-matrix-test/**'
     prettier(['prettier': '2.8.8', 'prettier-plugin-java': '2.2.0'])
         .config(['proseWrap': 'always', 'printWidth': 120])
   }

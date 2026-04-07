@@ -23,7 +23,10 @@ public class SeparatedStoreBufferService extends AbstractStoreBufferService {
   private final int sortedPoolSize;
   private final int unsortedPoolSize;
 
-  SeparatedStoreBufferService(VeniceServerConfig serverConfig, MetricsRepository metricsRepository) {
+  SeparatedStoreBufferService(
+      VeniceServerConfig serverConfig,
+      MetricsRepository metricsRepository,
+      String clusterName) {
     this(
         serverConfig.getDrainerPoolSizeSortedInput(),
         serverConfig.getDrainerPoolSizeUnsortedInput(),
@@ -34,7 +37,8 @@ public class SeparatedStoreBufferService extends AbstractStoreBufferService {
             serverConfig.isStoreWriterBufferAfterLeaderLogicEnabled(),
             serverConfig.getLogContext(),
             metricsRepository,
-            true),
+            true,
+            clusterName),
         new StoreBufferService(
             serverConfig.getDrainerPoolSizeUnsortedInput(),
             serverConfig.getStoreWriterBufferMemoryCapacity(),
@@ -42,7 +46,8 @@ public class SeparatedStoreBufferService extends AbstractStoreBufferService {
             serverConfig.isStoreWriterBufferAfterLeaderLogicEnabled(),
             serverConfig.getLogContext(),
             metricsRepository,
-            false));
+            false,
+            clusterName));
     LOGGER.info(
         "Created separated store buffer service with {} sorted drainers and {} unsorted drainers queues with capacity of {}",
         sortedPoolSize,
@@ -84,9 +89,10 @@ public class SeparatedStoreBufferService extends AbstractStoreBufferService {
   }
 
   @Override
-  public void drainBufferedRecordsFromTopicPartition(PubSubTopicPartition topicPartition) throws InterruptedException {
-    sortedStoreBufferServiceDelegate.drainBufferedRecordsFromTopicPartition(topicPartition);
-    unsortedStoreBufferServiceDelegate.drainBufferedRecordsFromTopicPartition(topicPartition);
+  public void drainBufferedRecordsFromTopicPartition(PubSubTopicPartition topicPartition, long timeoutMs)
+      throws InterruptedException {
+    sortedStoreBufferServiceDelegate.drainBufferedRecordsFromTopicPartition(topicPartition, timeoutMs);
+    unsortedStoreBufferServiceDelegate.drainBufferedRecordsFromTopicPartition(topicPartition, timeoutMs);
   }
 
   @Override

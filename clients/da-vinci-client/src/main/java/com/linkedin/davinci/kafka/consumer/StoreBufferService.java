@@ -21,6 +21,7 @@ import com.linkedin.venice.pubsub.api.PubSubMessage;
 import com.linkedin.venice.pubsub.api.PubSubPosition;
 import com.linkedin.venice.pubsub.api.PubSubTopic;
 import com.linkedin.venice.pubsub.api.PubSubTopicPartition;
+import com.linkedin.venice.stats.OpenTelemetryMetricsSetup;
 import com.linkedin.venice.utils.DaemonThreadFactory;
 import com.linkedin.venice.utils.LogContext;
 import com.linkedin.venice.utils.Utils;
@@ -84,7 +85,8 @@ public class StoreBufferService extends AbstractStoreBufferService {
       boolean queueLeaderWrites,
       LogContext logContext,
       MetricsRepository metricsRepository,
-      boolean sorted) {
+      boolean sorted,
+      String clusterName) {
     this(
         drainerNum,
         bufferCapacityPerDrainer,
@@ -93,7 +95,8 @@ public class StoreBufferService extends AbstractStoreBufferService {
         null,
         logContext,
         metricsRepository,
-        sorted);
+        sorted,
+        clusterName);
   }
 
   /**
@@ -106,7 +109,16 @@ public class StoreBufferService extends AbstractStoreBufferService {
       boolean queueLeaderWrites,
       StoreBufferServiceStats stats,
       LogContext logContext) {
-    this(drainerNum, bufferCapacityPerDrainer, bufferNotifyDelta, queueLeaderWrites, stats, logContext, null, true);
+    this(
+        drainerNum,
+        bufferCapacityPerDrainer,
+        bufferNotifyDelta,
+        queueLeaderWrites,
+        stats,
+        logContext,
+        null,
+        true,
+        null);
   }
 
   /**
@@ -124,7 +136,8 @@ public class StoreBufferService extends AbstractStoreBufferService {
       StoreBufferServiceStats stats,
       LogContext logContext,
       MetricsRepository metricsRepository,
-      boolean sorted) {
+      boolean sorted,
+      String clusterName) {
     this.logContext = logContext;
     this.drainerNum = drainerNum;
     this.blockingQueueArr = new ArrayList<>();
@@ -139,6 +152,8 @@ public class StoreBufferService extends AbstractStoreBufferService {
         : new StoreBufferServiceStats(
             Objects.requireNonNull(metricsRepository),
             sorted ? "StoreBufferServiceSorted" : "StoreBufferServiceUnsorted",
+            clusterName,
+            sorted,
             this::getTotalMemoryUsage,
             this::getTotalRemainingMemory,
             this::getMaxMemoryUsagePerDrainer,
@@ -286,16 +301,9 @@ public class StoreBufferService extends AbstractStoreBufferService {
    * @param topicPartition for which to drain buffer
    * @throws InterruptedException
    */
-  public void drainBufferedRecordsFromTopicPartition(PubSubTopicPartition topicPartition) throws InterruptedException {
-    int retryNum = 1000;
-    int sleepIntervalInMS = 50;
-    internalDrainBufferedRecordsFromTopicPartition(topicPartition, retryNum, sleepIntervalInMS);
-  }
-
-  protected void internalDrainBufferedRecordsFromTopicPartition(
-      PubSubTopicPartition topicPartition,
-      int retryNum,
-      int sleepIntervalInMS) throws InterruptedException {
+  @Override
+  public void drainBufferedRecordsFromTopicPartition(PubSubTopicPartition topicPartition, long timeoutMs)
+      throws InterruptedException {
     DefaultPubSubMessage fakeRecord = new FakePubSubMessage(topicPartition);
     int workerIndex = getDrainerIndexForConsumerRecord(fakeRecord, topicPartition.getPartitionNumber());
     BlockingQueue<QueueNode> blockingQueue = blockingQueueArr.get(workerIndex);
@@ -306,9 +314,8 @@ public class StoreBufferService extends AbstractStoreBufferService {
     }
 
     QueueNode fakeNode = new QueueNode(fakeRecord, null, "dummyKafkaUrl", 0);
-
-    int cur = 0;
-    while (cur++ < retryNum) {
+    long deadline = System.currentTimeMillis() + timeoutMs;
+    while (System.currentTimeMillis() < deadline) {
       if (!blockingQueue.contains(fakeNode)) {
         LOGGER.info(
             "The blocking queue of store writer thread: {} doesn't contain any record for: {}",
@@ -316,11 +323,10 @@ public class StoreBufferService extends AbstractStoreBufferService {
             topicPartition);
         return;
       }
-      Thread.sleep(sleepIntervalInMS);
+      Thread.sleep(50);
     }
-    String errorMessage = "There are still some records left in the blocking queue of store writer thread: "
-        + workerIndex + " for topic: " + topicPartition.getPubSubTopic().getName() + " partition after retry for "
-        + retryNum + " times";
+    String errorMessage = "Drainer queue for " + topicPartition + " on writer thread " + workerIndex
+        + " not fully drained after " + timeoutMs + "ms";
     LOGGER.error(errorMessage);
     throw new VeniceException(errorMessage);
   }
@@ -768,6 +774,7 @@ public class StoreBufferService extends AbstractStoreBufferService {
       LeaderProducedRecordContext leaderProducedRecordContext = null;
       StoreIngestionTask ingestionTask = null;
       CompletableFuture<Void> recordPersistedFuture = null;
+      String storeName = OpenTelemetryMetricsSetup.UNKNOWN_STORE_NAME;
       while (isRunning.get()) {
         try {
           node = blockingQueue.take();
@@ -777,6 +784,8 @@ public class StoreBufferService extends AbstractStoreBufferService {
           leaderProducedRecordContext = node.getLeaderProducedRecordContext();
           ingestionTask = node.getIngestionTask();
           recordPersistedFuture = node.getQueuedRecordPersistedFuture();
+          storeName =
+              OpenTelemetryMetricsSetup.sanitizeStoreName(ingestionTask != null ? ingestionTask.getStoreName() : null);
 
           long startTime = System.currentTimeMillis();
 
@@ -806,7 +815,7 @@ public class StoreBufferService extends AbstractStoreBufferService {
             recordPersistedFuture.complete(null);
           }
           long latencyInMS = System.currentTimeMillis() - startTime;
-          this.stats.recordInternalProcessingLatency(latencyInMS);
+          this.stats.recordInternalProcessingLatency(latencyInMS, storeName);
           topicToTimeSpent.compute(consumerRecord.getTopicPartition(), (K, V) -> (V == null ? 0 : V) + latencyInMS);
         } catch (Throwable e) {
           if (e instanceof InterruptedException) {
@@ -829,7 +838,7 @@ public class StoreBufferService extends AbstractStoreBufferService {
             logBuilder.append(consumerRecordString);
           }
           LOGGER.error(logBuilder.toString(), e);
-          stats.recordInternalProcessingError();
+          stats.recordInternalProcessingError(storeName);
 
           /**
            * Catch all the thrown exception and store it in {@link StoreIngestionTask#lastWorkerException}.

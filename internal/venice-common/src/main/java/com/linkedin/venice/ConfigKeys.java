@@ -513,6 +513,14 @@ public class ConfigKeys {
       "controller.backup.version.deletion.sleep.ms";
 
   /**
+   * The minimum delay in milliseconds before any backup version may be deleted after a new
+   * current version is promoted. Gives routers and servers time to switch versions before
+   * the old backup is removed. Defaults to 1 hour.
+   */
+  public static final String CONTROLLER_BACKUP_VERSION_MIN_CLEANUP_DELAY_MS =
+      "controller.backup.version.min.cleanup.delay.ms";
+
+  /**
    * The following config is to control whether to enable backup version cleanup based on retention policy or not at cluster level.
    */
   public static final String CONTROLLER_BACKUP_VERSION_RETENTION_BASED_CLEANUP_ENABLED =
@@ -2340,6 +2348,12 @@ public class ConfigKeys {
       "controller.auto.materialize.davinci.push.status.system.store";
 
   // --- Alternative PubSub backend configs (per-cluster, per-topic-type) ---
+  // Each per-topic flag falls back to the umbrella CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_ALL.
+  // This lets operators enable all topic types at once (all=true) and selectively disable
+  // individual ones, or ramp each type independently without touching the others.
+
+  /** Enable alternative pubsub backend for ALL topic types. Default: false */
+  public static final String CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_ALL = "controller.pubsub.alternative.backend.all";
 
   /** Create meta system store version topics using alternative pubsub backend. Default: false */
   public static final String CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_META_SYSTEM_STORE_VT =
@@ -2357,13 +2371,17 @@ public class ConfigKeys {
   public static final String CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_PUSH_STATUS_SYSTEM_STORE_RT =
       "controller.pubsub.alternative.backend.push.status.system.store.rt";
 
-  /** Create user store version topics using alternative pubsub backend. Default: false */
-  public static final String CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_USER_STORE_VT =
-      "controller.pubsub.alternative.backend.user.store.vt";
+  /** Create batch-only user store version topics using alternative pubsub backend. Default: false */
+  public static final String CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_BATCH_USER_STORE_VT =
+      "controller.pubsub.alternative.backend.batch.user.store.vt";
 
-  /** Create user store RT topics using alternative pubsub backend. Default: false */
-  public static final String CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_USER_STORE_RT =
-      "controller.pubsub.alternative.backend.user.store.rt";
+  /** Create hybrid user store version topics using alternative pubsub backend. Default: false */
+  public static final String CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_HYBRID_USER_STORE_VT =
+      "controller.pubsub.alternative.backend.hybrid.user.store.vt";
+
+  /** Create hybrid user store RT topics using alternative pubsub backend. Default: false */
+  public static final String CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_HYBRID_USER_STORE_RT =
+      "controller.pubsub.alternative.backend.hybrid.user.store.rt";
 
   /** Comma-separated store names excluded from alternative pubsub backend. Default: empty */
   public static final String CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_EXCLUSION_LIST =
@@ -2442,6 +2460,34 @@ public class ConfigKeys {
    */
   public static final String SERVER_INGESTION_CHECKPOINT_DURING_GRACEFUL_SHUTDOWN_ENABLED =
       "server.ingestion.checkpoint.during.graceful.shutdown.enabled";
+
+  /**
+   * Maximum time in milliseconds to wait for the drainer to execute a sync offset command during graceful shutdown.
+   * The sync command itself is fast; the wait is for it to reach the front of the shared drainer queue.
+   */
+  public static final String SERVER_SHUTDOWN_SYNC_OFFSET_TIMEOUT_MS = "server.shutdown.sync.offset.timeout.ms";
+
+  /**
+   * Maximum time in milliseconds to wait for the drainer queue to fully drain for a partition.
+   * Used during graceful shutdown and also during state transitions (leader/follower resubscribe, topic switches)
+   * that wait for in-flight records to be processed after unsubscription. After unsubscription, very few records
+   * remain in the queue; records not drained in time will be re-consumed from the last checkpoint on restart.
+   */
+  public static final String SERVER_DRAIN_TIMEOUT_MS = "server.drain.timeout.ms";
+
+  /**
+   * Maximum time in milliseconds to wait for all per-partition shutdown futures to complete in
+   * {@code shutdownPartitionConsumptionStates}. This is the outer timeout that caps the total time spent on
+   * per-partition syncOffset + drain operations during SIT shutdown.
+   */
+  public static final String SERVER_SHUTDOWN_PARTITION_STATE_TIMEOUT_MS = "server.shutdown.partition.state.timeout.ms";
+
+  /**
+   * Maximum time in seconds for {@code shutdownAndWait} to wait for the StoreIngestionTask thread to complete
+   * its shutdown sequence (unsubscribe, checkpoint, internalClose). This is the outermost timeout that caps
+   * the total SIT shutdown time.
+   */
+  public static final String SERVER_SHUTDOWN_SIT_WAIT_TIME_SECONDS = "server.shutdown.sit.wait.time.seconds";
 
   /**
    * Whether to emit OTel metrics for ingestion stats. When enabled (and the global OTel flag is also enabled),
@@ -2623,6 +2669,22 @@ public class ConfigKeys {
   public static final String SERVER_INGESTION_HEARTBEAT_INTERVAL_MS = "server.ingestion.heartbeat.interval.ms";
 
   /**
+   * When enabled, {@code PubSubMessageDeserializer} falls back to the Venice producer timestamp
+   * ({@code producerMetadata.messageTimestamp} from the KafkaMessageEnvelope) when the pub-sub
+   * system does not provide a reliable per-message timestamp (i.e. the broker timestamp is null
+   * or zero). This protects all downstream call sites of {@code getPubSubMessageTime()} —
+   * including DIV compaction checks, ingestion latency metrics, Beam watermarks, CDC event
+   * timestamps, and DaVinci record transformer metadata — from receiving a zero timestamp.
+   *
+   * <p>This also prevents downstream changelog consumer clients that durably checkpoint
+   * {@code getPubSubMessageTime()} as a seek watermark from persisting a zero timestamp and
+   * replaying all data on every restart.
+   *
+   * <p>Default: {@code true} (enabled). Disable only for debugging or rollback purposes.
+   */
+  public static final String PUBSUB_PRODUCER_TIMESTAMP_FALLBACK_ENABLED = "pubsub.producer.timestamp.fallback.enabled";
+
+  /**
    * Enable record-level timestamp tracking in heartbeat monitoring service.
    * When enabled, the monitoring service will track timestamps for all records processed during
    * ingestion, not just heartbeat control messages. This provides more granular visibility into
@@ -2638,6 +2700,13 @@ public class ConfigKeys {
    * Requires SERVER_RECORD_LEVEL_TIMESTAMP_ENABLED to be true.
    */
   public static final String SERVER_PER_RECORD_OTEL_METRICS_ENABLED = "server.per.record.otel.metrics.enabled";
+
+  /**
+   * When enabled, per-record OTel metrics are emitted for batch pushes
+   * Requires SERVER_RECORD_LEVEL_TIMESTAMP_ENABLED and SERVER_PER_RECORD_OTEL_METRICS_ENABLED to be true.
+   */
+  public static final String SERVER_PER_RECORD_BATCH_OTEL_METRICS_ENABLED =
+      "server.per.record.batch.otel.metrics.enabled";
 
   /**
    * Follower replicas and DavinciClient will only consider heartbeats received within
@@ -2678,20 +2747,6 @@ public class ConfigKeys {
    */
   public static final String SERVER_NON_EXISTING_TOPIC_CHECK_RETRY_INTERNAL_SECOND =
       "server.non.existing.topic.check.retry.interval.second";
-
-  /**
-   * Handling AA or WC stores is expensive because of RocksDB lookup, and this following
-   * feature will handle these writes in dedicated consumer pool, so that the full
-   * updates won't be affected by the heavy writes to these AA/WC stores.
-   */
-  public static final String SERVER_DEDICATED_CONSUMER_POOL_FOR_AA_WC_LEADER_ENABLED =
-      "server.dedicated.consumer.pool.for.aa.wc.leader.enabled";
-
-  public static final String SERVER_DEDICATED_CONSUMER_POOL_SIZE_FOR_AA_WC_LEADER =
-      "server.dedicated.consumer.pool.size.for.aa.wc.leader";
-
-  public static final String SERVER_DEDICATED_CONSUMER_POOL_SIZE_FOR_SEP_RT_LEADER =
-      "server.dedicated.consumer.pool.size.for.sep.rt.leader";
 
   /**
    * Consumer Pool allocation strategy to rely on pool size to prioritize specific traffic. There will be 3 different
@@ -2738,8 +2793,6 @@ public class ConfigKeys {
    * 1.0, and the max setting is 1.2 * basic throttling limit.
    */
   public static final String KAFKA_FETCH_THROTTLER_FACTORS_PER_SECOND = "kafka.fetch.throttler.factors.per.second";
-  public static final String SERVER_THROTTLER_FACTORS_FOR_AA_WC_LEADER = "server_throttler_factors_for_aa_wc_leader";
-  public static final String SERVER_THROTTLER_FACTORS_FOR_SEP_RT_LEADER = "server.throttler.factors.for.sep.rt.leader";
   public static final String SERVER_THROTTLER_FACTORS_FOR_CURRENT_VERSION_AA_WC_LEADER =
       "server.throttler.factors.for.current.version.aa.wc.leader";
   public static final String SERVER_THROTTLER_FACTORS_FOR_CURRENT_VERSION_SEPARATE_RT_LEADER =
@@ -2854,19 +2907,6 @@ public class ConfigKeys {
    */
   public static final String SERVER_RESUBSCRIPTION_CHECK_INTERVAL_IN_SECONDS =
       "server.resubscription.check.interval.in.seconds";
-
-  /**
-   * Quota for AA/WC leader replica as we know AA/WC messages are expensive, so we would like to use the following throttler
-   * to limit the resource usage.
-   */
-  public static final String SERVER_AA_WC_LEADER_QUOTA_RECORDS_PER_SECOND =
-      "server.aa.wc.leader.quota.records.per.second";
-  /**
-   * Quota for separate realtime topic leader replica as we know separate realtime topic messages are not prioritized
-   * compared to realtime topic messages, so we would like to use the following throttler to limit the resource usage.
-   */
-  public static final String SERVER_SEP_RT_LEADER_QUOTA_RECORDS_PER_SECOND =
-      "server.sep.rt.leader.quota.records.per.second";
 
   /**
    * The following finer quota enforcement will be used when {@literal ConsumerPoolStrategyType.CURRENT_VERSION_PRIORITIZATION}
@@ -3178,17 +3218,6 @@ public class ConfigKeys {
       "davinci.record.transformer.on.recovery.thread.pool.size";
 
   /**
-   * Enable/disable the key URN compression feature in DaVinci.
-   * When this feature is enabled, DaVinci will compress the key URN before storing it in the local RocksDB
-   * if the store version has key URN compression enabled.
-   *
-   * Essentially, there are two levels of config to control the key URN compression feature:
-   * 1) Store version level config.
-   * 2) DaVinci level config (this config).
-   */
-  public static final String KEY_URN_COMPRESSION_ENABLED = "key.urn.compression.enabled";
-
-  /**
    * If enabled, the parent-controller's multitask scheduler service would be enabled
    */
   public static final String MULTITASK_SCHEDULER_SERVICE_ENABLED = "multitask.scheduler.service.enabled";
@@ -3295,4 +3324,20 @@ public class ConfigKeys {
    * component names (e.g., "DAVINCI_CLIENT", "DVRT_STATEFUL_CDC", "DVRT_STATELESS_CDC").
    */
   public static final String VENICE_LOG_CONTEXT_COMPONENT = "venice.log.context.component";
+
+  /**
+   * Partial-update results larger than this threshold (in bytes) are tracked in the per-partition heavy-key map
+   * for amplification detection. Default: 100 KB.
+   */
+  public static final String PARTIAL_UPDATE_LARGE_RESULT_LOG_THRESHOLD_BYTES =
+      "partial.update.large.result.log.threshold.bytes";
+
+  /**
+   * How often (in ms) to emit a per-partition summary report of partial-update amplification.
+   * Only partitions with large results are reported. Default: -1 (disabled).
+   * Set to a positive value (e.g., 60000 for 1 minute) to enable. Set to -1 to disable entirely
+   * (no per-record overhead).
+   */
+  public static final String PARTIAL_UPDATE_AMPLIFICATION_REPORT_INTERVAL_MS =
+      "partial.update.amplification.report.interval.ms";
 }

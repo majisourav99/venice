@@ -17,7 +17,6 @@ import static com.linkedin.venice.utils.IntegrationTestPushUtils.defaultVPJProps
 import static com.linkedin.venice.utils.TestWriteUtils.STRING_SCHEMA;
 import static com.linkedin.venice.utils.TestWriteUtils.getTempDataDirectory;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.DATA_WRITER_COMPUTE_JOB_CLASS;
-import static com.linkedin.venice.vpj.VenicePushJobConstants.KAFKA_INPUT_BROKER_URL;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.KAFKA_INPUT_MAX_RECORDS_PER_MAPPER;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.REPUSH_TTL_ENABLE;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.REPUSH_TTL_START_TIMESTAMP;
@@ -25,6 +24,7 @@ import static com.linkedin.venice.vpj.VenicePushJobConstants.REWIND_TIME_IN_SECO
 import static com.linkedin.venice.vpj.VenicePushJobConstants.RMD_FIELD_PROP;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.SOURCE_KAFKA;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.SPARK_NATIVE_INPUT_FORMAT_ENABLED;
+import static com.linkedin.venice.vpj.VenicePushJobConstants.VENICE_REPUSH_SOURCE_PUBSUB_BROKER;
 import static com.linkedin.venice.writer.VeniceWriter.DEFAULT_TERM_ID;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
@@ -129,7 +129,8 @@ public class TestHybridMultiRegion {
                   .setStorageQuotaInByte(Store.UNLIMITED_STORAGE_QUOTA)
                   .setHybridRewindSeconds(streamingRewindSeconds)
                   .setHybridOffsetLagThreshold(streamingMessageLag)));
-      controllerClient.emptyPush(storeName, Utils.getUniqueString("empty-hybrid-push"), 1L);
+      controllerClient
+          .sendEmptyPushAndWait(storeName, Utils.getUniqueString("empty-hybrid-push"), 1L, Time.MS_PER_SECOND * 60);
 
       // Prepare input for a batch push with RMD data
       long recordTimestamp = 123456789L;
@@ -153,7 +154,9 @@ public class TestHybridMultiRegion {
           sharedVenice.getChildRegions().get(0).getClusters().get(clusterName);
       Properties props = IntegrationTestPushUtils.defaultVPJProps(sharedVenice, "dummyInputPath", storeName);
       props.setProperty(SOURCE_KAFKA, "true");
-      props.setProperty(KAFKA_INPUT_BROKER_URL, sharedVeniceClusterWrapper.getPubSubBrokerWrapper().getAddress());
+      props.setProperty(
+          VENICE_REPUSH_SOURCE_PUBSUB_BROKER,
+          sharedVeniceClusterWrapper.getPubSubBrokerWrapper().getAddress());
       props.setProperty(KAFKA_INPUT_MAX_RECORDS_PER_MAPPER, "5");
       props.setProperty(REPUSH_TTL_ENABLE, "true");
       // Override the TTL repush start TS to work with logical TS setup.

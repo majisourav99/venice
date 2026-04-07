@@ -137,6 +137,9 @@ public enum VeniceMetricsDimensions {
   /** {@link VeniceConsumerPoolAction} Consumer pool action (subscribe, update_assignment). */
   VENICE_CONSUMER_POOL_ACTION("venice.consumer_pool.action"),
 
+  /** Consumer pool type (regular_pool, current_version_aa_wc_leader_pool, etc.). */
+  VENICE_CONSUMER_POOL_TYPE("venice.consumer_pool.type"),
+
   /** {@link VeniceDIVResult} Data Integrity Validation result (success, duplicate, missing, corrupted). */
   VENICE_DIV_RESULT("venice.div.result"),
 
@@ -144,7 +147,13 @@ public enum VeniceMetricsDimensions {
   VENICE_DIV_SEVERITY("venice.div.severity"),
 
   /** {@link QuotaRequestOutcome} Outcome of read quota enforcement (allowed, rejected, allowed_unintentionally). */
-  VENICE_QUOTA_REQUEST_OUTCOME("venice.quota.request.outcome");
+  VENICE_QUOTA_REQUEST_OUTCOME("venice.quota.request.outcome"),
+
+  /** {@link VeniceConnectionSource} Connection source type: router or client. */
+  VENICE_CONNECTION_SOURCE("venice.connection.source"),
+
+  /** {@link VeniceDrainerType} Drainer type: sorted or unsorted. */
+  VENICE_DRAINER_TYPE("venice.drainer.type");
 
   private final String[] dimensionName = new String[VeniceOpenTelemetryMetricNamingFormat.SIZE];
 

@@ -2,6 +2,7 @@ package com.linkedin.venice.stats;
 
 import com.linkedin.venice.read.RequestType;
 import com.linkedin.venice.stats.dimensions.RequestRetryType;
+import com.linkedin.venice.stats.dimensions.VeniceDimensionInterface;
 import com.linkedin.venice.stats.dimensions.VeniceMetricsDimensions;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
@@ -84,11 +85,13 @@ public class OpenTelemetryMetricsSetup {
     private static final int UNASSIGNED_HELIX_GROUP_ID = -1;
 
     private final MetricsRepository metricsRepository;
+    private final Map<VeniceMetricsDimensions, String> customDimensions = new HashMap<>();
     private String storeName;
     private RequestType requestType;
     private Boolean isTotalStats;
     private Boolean otelEnabledOverride;
     private String clusterName;
+    private String regionName;
     private String routeName;
     private RequestRetryType requestRetryType;
     private String threadPoolName;
@@ -143,6 +146,14 @@ public class OpenTelemetryMetricsSetup {
     }
 
     /**
+     * Set the region/datacenter name dimension.
+     */
+    public Builder setRegionName(String regionName) {
+      this.regionName = regionName;
+      return this;
+    }
+
+    /**
      * Set the route name dimension.
      */
     public Builder setRouteName(String routeName) {
@@ -171,6 +182,23 @@ public class OpenTelemetryMetricsSetup {
      */
     public Builder setHelixGroupId(int helixGroupId) {
       this.helixGroupId = helixGroupId;
+      return this;
+    }
+
+    /**
+     * Add a custom dimension from a {@link VeniceDimensionInterface} enum value. Use this for
+     * component-specific dimensions that are not standard builder parameters (e.g., buffer type)
+     * that are used once or in a few places, to avoid bloating the builder with rarely-used parameters.
+     * The dimension key and value are derived from the enum.
+     *
+     * @param dimensionValue the enum value providing both dimension key and value; must not be null
+     * @throws IllegalArgumentException if dimensionValue is null
+     */
+    public Builder addCustomDimension(VeniceDimensionInterface dimensionValue) {
+      if (dimensionValue == null) {
+        throw new IllegalArgumentException("Custom dimension enum value must not be null");
+      }
+      customDimensions.put(dimensionValue.getDimensionName(), dimensionValue.getDimensionValue());
       return this;
     }
 
@@ -226,6 +254,13 @@ public class OpenTelemetryMetricsSetup {
             .put(otelRepository.getDimensionName(VeniceMetricsDimensions.VENICE_CLUSTER_NAME), clusterName);
       }
 
+      // Add region name if provided
+      if (regionName != null) {
+        baseDimensionsMap.put(VeniceMetricsDimensions.VENICE_REGION_NAME, regionName);
+        baseAttributesBuilder
+            .put(otelRepository.getDimensionName(VeniceMetricsDimensions.VENICE_REGION_NAME), regionName);
+      }
+
       // Add route name if provided
       if (routeName != null) {
         baseDimensionsMap.put(VeniceMetricsDimensions.VENICE_ROUTE_NAME, routeName);
@@ -257,6 +292,12 @@ public class OpenTelemetryMetricsSetup {
         baseDimensionsMap.put(VeniceMetricsDimensions.VENICE_HELIX_GROUP_ID, helixGroupIdStr);
         baseAttributesBuilder
             .put(otelRepository.getDimensionName(VeniceMetricsDimensions.VENICE_HELIX_GROUP_ID), helixGroupIdStr);
+      }
+
+      // Add custom dimensions
+      for (Map.Entry<VeniceMetricsDimensions, String> entry: customDimensions.entrySet()) {
+        baseDimensionsMap.put(entry.getKey(), entry.getValue());
+        baseAttributesBuilder.put(otelRepository.getDimensionName(entry.getKey()), entry.getValue());
       }
 
       Attributes baseAttributes = baseAttributesBuilder.build();

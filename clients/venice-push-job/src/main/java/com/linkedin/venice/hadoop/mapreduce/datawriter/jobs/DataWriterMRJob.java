@@ -1,6 +1,5 @@
 package com.linkedin.venice.hadoop.mapreduce.datawriter.jobs;
 
-import static com.linkedin.venice.ConfigKeys.KAFKA_BOOTSTRAP_SERVERS;
 import static com.linkedin.venice.ConfigKeys.KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS;
 import static com.linkedin.venice.ConfigKeys.KAFKA_PRODUCER_REQUEST_TIMEOUT_MS;
 import static com.linkedin.venice.ConfigKeys.KAFKA_PRODUCER_RETRIES_CONFIG;
@@ -25,7 +24,6 @@ import static com.linkedin.venice.vpj.VenicePushJobConstants.INCREMENTAL_PUSH;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.INCREMENTAL_PUSH_RATE_LIMITER_TYPE;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.INCREMENTAL_PUSH_WRITE_QUOTA_RECORDS_PER_SECOND;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.INCREMENTAL_PUSH_WRITE_QUOTA_TIME_WINDOW_MS;
-import static com.linkedin.venice.vpj.VenicePushJobConstants.KAFKA_INPUT_BROKER_URL;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.KAFKA_INPUT_SOURCE_COMPRESSION_STRATEGY;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.KAFKA_INPUT_SOURCE_TOPIC_CHUNKING_ENABLED;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.KAFKA_INPUT_TOPIC;
@@ -43,6 +41,7 @@ import static com.linkedin.venice.vpj.VenicePushJobConstants.RMD_SCHEMA_DIR;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.SCHEMA_STRING_PROP;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.SSL_PREFIX;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.STORAGE_QUOTA_PROP;
+import static com.linkedin.venice.vpj.VenicePushJobConstants.STORE_SEPARATE_REALTIME_TOPIC_ENABLED;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.SYSTEM_SCHEMA_READER_ENABLED;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.TELEMETRY_MESSAGE_INTERVAL;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.TOPIC_PROP;
@@ -50,6 +49,8 @@ import static com.linkedin.venice.vpj.VenicePushJobConstants.UPDATE_SCHEMA_STRIN
 import static com.linkedin.venice.vpj.VenicePushJobConstants.VALUE_FIELD_PROP;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.VALUE_SCHEMA_DIR;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.VALUE_SCHEMA_ID_PROP;
+import static com.linkedin.venice.vpj.VenicePushJobConstants.VENICE_PUSH_DESTINATION_PUBSUB_BROKER;
+import static com.linkedin.venice.vpj.VenicePushJobConstants.VENICE_REPUSH_SOURCE_PUBSUB_BROKER;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.VSON_PUSH;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.ZSTD_COMPRESSION_LEVEL;
 import static com.linkedin.venice.vpj.VenicePushJobConstants.ZSTD_DICTIONARY_CREATION_SUCCESS;
@@ -138,7 +139,7 @@ public class DataWriterMRJob extends DataWriterComputeJob {
         pushJobSetting);
     conf.set(BATCH_NUM_BYTES_PROP, Integer.toString(pushJobSetting.batchNumBytes));
     conf.set(TOPIC_PROP, pushJobSetting.topic);
-    conf.set(KAFKA_BOOTSTRAP_SERVERS, pushJobSetting.kafkaUrl);
+    conf.set(VENICE_PUSH_DESTINATION_PUBSUB_BROKER, pushJobSetting.pushDestinationPubsubBroker);
     conf.set(PARTITIONER_CLASS, pushJobSetting.partitionerClass);
     // flatten partitionerParams since JobConf class does not support set an object
     if (pushJobSetting.partitionerParams != null) {
@@ -165,7 +166,7 @@ public class DataWriterMRJob extends DataWriterComputeJob {
        * So here will set it up from {@link #pushJobSetting}.
        */
       conf.set(KAFKA_INPUT_TOPIC, pushJobSetting.kafkaInputTopic);
-      conf.set(KAFKA_INPUT_BROKER_URL, pushJobSetting.kafkaInputBrokerUrl);
+      conf.set(VENICE_REPUSH_SOURCE_PUBSUB_BROKER, pushJobSetting.repushSourcePubsubBroker);
       conf.setBoolean(REPUSH_TTL_ENABLE, pushJobSetting.repushTTLEnabled);
       conf.setLong(REPUSH_TTL_START_TIMESTAMP, pushJobSetting.repushTTLStartTimeMs);
       if (pushJobSetting.repushTTLEnabled) {
@@ -190,6 +191,7 @@ public class DataWriterMRJob extends DataWriterComputeJob {
     // Incremental push throttling configs - pass through to mapper/reducer
     conf.setBoolean(INCREMENTAL_PUSH, pushJobSetting.isIncrementalPush);
     conf.setBoolean(PUSH_TO_SEPARATE_REALTIME_TOPIC, pushJobSetting.pushToSeparateRealtimeTopicEnabled);
+    conf.setBoolean(STORE_SEPARATE_REALTIME_TOPIC_ENABLED, pushJobSetting.versionSeparateRealTimeTopicEnabled);
     conf.set(
         INCREMENTAL_PUSH_WRITE_QUOTA_RECORDS_PER_SECOND,
         props.getString(INCREMENTAL_PUSH_WRITE_QUOTA_RECORDS_PER_SECOND, "-1"));

@@ -231,6 +231,10 @@ public class VeniceControllerMultiClusterConfig {
     return getCommonConfig().getBackupVersionCleanupSleepMs();
   }
 
+  public long getBackupVersionMinCleanupDelayMs() {
+    return getCommonConfig().getBackupVersionMinCleanupDelayMs();
+  }
+
   public long getDeferredVersionSwapSleepMs() {
     return getCommonConfig().getDeferredVersionSwapSleepMs();
   }
@@ -323,8 +327,8 @@ public class VeniceControllerMultiClusterConfig {
     return getCommonConfig().getDanglingTopicOccurrenceThresholdForCleanup();
   }
 
-  public int getDefaultMaxRecordSizeBytes() {
-    return getCommonConfig().getDefaultMaxRecordSizeBytes();
+  public int getDefaultMaxRecordSizeBytes(String clusterName) {
+    return getControllerConfig(clusterName).getDefaultMaxRecordSizeBytes();
   }
 
   public long getServiceDiscoveryRegistrationRetryMS() {
