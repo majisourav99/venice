@@ -325,7 +325,9 @@ public class VeniceServer {
     AggVersionedStorageEngineStats storageEngineStats = new AggVersionedStorageEngineStats(
         metricsRepository,
         metadataRepo,
-        serverConfig.isUnregisterMetricForDeletedStoreEnabled());
+        serverConfig.isUnregisterMetricForDeletedStoreEnabled(),
+        serverConfig.getVersionSwapDiskSizeDropAlertThreshold(),
+        clusterConfig.getClusterName());
     boolean plainTableEnabled =
         veniceConfigLoader.getVeniceServerConfig().getRocksDBServerConfig().isRocksDBPlainTableFormatEnabled();
     RocksDBMemoryStats rocksDBMemoryStats = veniceConfigLoader.getVeniceServerConfig().isDatabaseMemoryStatsEnabled()
@@ -440,7 +442,11 @@ public class VeniceServer {
         serverConfig.getLogContext());
     services.add(diskHealthCheckService);
     // create stats for disk health check service
-    new DiskHealthStats(metricsRepository, diskHealthCheckService, "disk_health_check_service");
+    new DiskHealthStats(
+        metricsRepository,
+        diskHealthCheckService,
+        "disk_health_check_service",
+        clusterConfig.getClusterName());
 
     final Optional<ResourceReadUsageTracker> resourceReadUsageTracker;
     if (serverConfig.isOptimizeDatabaseForBackupVersionEnabled()) {

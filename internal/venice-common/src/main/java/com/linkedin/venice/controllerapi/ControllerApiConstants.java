@@ -130,6 +130,9 @@ public class ControllerApiConstants {
 
   public static final String BACKUP_STRATEGY = "backup_strategy";
 
+  public static final String INGESTION_PAUSE_MODE = "ingestion_pause_mode";
+  public static final String INGESTION_PAUSED_REGIONS = "ingestion_paused_regions";
+
   public static final String AUTO_SCHEMA_REGISTER_FOR_PUSHJOB_ENABLED = "auto_auto_register_for_pushjob_enabled";
 
   public static final String REGULAR_VERSION_ETL_ENABLED = "regular_version_etl_enabled";
@@ -236,6 +239,8 @@ public class ControllerApiConstants {
   public static final String KAFKA_TOPIC_LOG_COMPACTION_ENABLED = "kafka.topic.log.compaction.enabled";
   public static final String KAFKA_TOPIC_RETENTION_IN_MS = "kafka.topic.retention.in.ms";
   public static final String KAFKA_TOPIC_MIN_IN_SYNC_REPLICA = "kafka.topic.min.in.sync.replica";
+  public static final String KAFKA_TOPIC_UNCLEAN_LEADER_ELECTION_ENABLED =
+      "kafka.topic.unclean.leader.election.enabled";
   public static final String UPSTREAM_POSITION = "upstream_position";
   public static final String ADMIN_OPERATION_PROTOCOL_VERSION = "admin_operation_protocol_version";
 
@@ -274,6 +279,10 @@ public class ControllerApiConstants {
 
   public static final String NEARLINE_PRODUCER_COMPRESSION_ENABLED = "nearline_producer_compression_enabled";
   public static final String NEARLINE_PRODUCER_COUNT_PER_WRITER = "nearline_producer_count_per_writer";
+  public static final String DATACENTER_NAME = "datacenter_name";
+  public static final String TIMEOUT_MINUTES = "timeout_minutes";
+  public static final String OPERATOR_ID = "operator_id";
+
   public static final String TARGET_SWAP_REGION = "target_swap_region";
   public static final String TARGET_SWAP_REGION_WAIT_TIME = "target_swap_region_wait_time";
   public static final String IS_DAVINCI_HEARTBEAT_REPORTED = "is_davinci_heartbeat_reported";

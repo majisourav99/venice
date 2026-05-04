@@ -31,6 +31,7 @@ import com.linkedin.venice.stats.metrics.MetricType;
 import com.linkedin.venice.stats.metrics.MetricUnit;
 import com.linkedin.venice.utils.OpenTelemetryDataTestUtils;
 import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.metrics.DoubleHistogram;
 import io.opentelemetry.api.metrics.LongCounter;
@@ -47,6 +48,7 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -185,16 +187,19 @@ public class VeniceOpenTelemetryMetricsRepositoryTest {
               RequestType.MULTI_GET_STREAMING.getDimensionValue())
           .build();
 
-      // ASYNC_DOUBLE_GAUGE needs DoubleSupplier; all others use LongSupplier
+      // Async gauges use the register* APIs; non-async types use createInstrument(entity);
+      // observable counter types return null from createInstrument (registered separately).
       Object instrument;
       if (metricType == MetricType.ASYNC_DOUBLE_GAUGE) {
-        instrument = metricsRepository.createInstrument(metricEntity, (DoubleSupplier) () -> 10.0, baseAttributes);
+        instrument = metricsRepository
+            .registerObservableDoubleGauge(metricEntity, measurement -> measurement.record(10.0, baseAttributes));
+      } else if (metricType == MetricType.ASYNC_GAUGE) {
+        instrument = metricsRepository
+            .registerObservableLongGauge(metricEntity, measurement -> measurement.record(10L, baseAttributes));
       } else {
-        instrument = metricsRepository.createInstrument(metricEntity, () -> 10, baseAttributes);
+        instrument = metricsRepository.createInstrument(metricEntity);
       }
 
-      // Observable counter types return null from createInstrument because they are registered separately
-      // via registerObservableLongCounter/UpDownCounter() after MetricEntityState construction
       if (metricType.isObservableCounterType()) {
         assertNull(instrument, "Instrument should be null for " + metricType + " (registered separately)");
         continue;
@@ -323,6 +328,43 @@ public class VeniceOpenTelemetryMetricsRepositoryTest {
   }
 
   @Test
+  public void testCreateInstrumentRejectsAsyncGaugeMetricTypes() {
+    // createInstrument(MetricEntity) handles only non-async types. Async gauges must use
+    // registerObservableLongGauge / registerObservableDoubleGauge.
+    Set<VeniceMetricsDimensions> dims = new HashSet<>();
+    dims.add(VeniceMetricsDimensions.VENICE_REQUEST_METHOD);
+    for (MetricType asyncGaugeType: new MetricType[] { MetricType.ASYNC_GAUGE, MetricType.ASYNC_DOUBLE_GAUGE }) {
+      MetricEntity entity =
+          new MetricEntity("test_" + asyncGaugeType.name(), asyncGaugeType, MetricUnit.NUMBER, "d", dims);
+      try {
+        metricsRepository.createInstrument(entity);
+        fail("createInstrument should have rejected " + asyncGaugeType);
+      } catch (IllegalArgumentException e) {
+        assertTrue(
+            e.getMessage().contains("registerObservableLongGauge")
+                || e.getMessage().contains("registerObservableDoubleGauge"),
+            "Message should direct callers to the correct API: " + e.getMessage());
+      }
+    }
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = ".*ASYNC_GAUGE.*")
+  public void testRegisterObservableLongGaugeRejectsWrongMetricType() {
+    Set<VeniceMetricsDimensions> dims = new HashSet<>();
+    dims.add(VeniceMetricsDimensions.VENICE_REQUEST_METHOD);
+    MetricEntity entity = new MetricEntity("test_counter", MetricType.COUNTER, MetricUnit.NUMBER, "d", dims);
+    metricsRepository.registerObservableLongGauge(entity, m -> m.record(1L, Attributes.empty()));
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = ".*ASYNC_DOUBLE_GAUGE.*")
+  public void testRegisterObservableDoubleGaugeRejectsWrongMetricType() {
+    Set<VeniceMetricsDimensions> dims = new HashSet<>();
+    dims.add(VeniceMetricsDimensions.VENICE_REQUEST_METHOD);
+    MetricEntity entity = new MetricEntity("test_gauge_long", MetricType.ASYNC_GAUGE, MetricUnit.NUMBER, "d", dims);
+    metricsRepository.registerObservableDoubleGauge(entity, m -> m.record(1.0, Attributes.empty()));
+  }
+
+  @Test
   public void testRepositoryCreationWithoutSetMetricEntities() {
     when(mockMetricsConfig.useOtelExponentialHistogram()).thenReturn(true);
     when(mockMetricsConfig.getMetricEntities()).thenReturn(null);
@@ -357,11 +399,14 @@ public class VeniceOpenTelemetryMetricsRepositoryTest {
     assertNotNull(metricPrefix, "Metric prefix should not be null");
     assertEquals(metricPrefix, "venice.test_prefix", "Metric prefix should match the configured value");
 
-    MetricEntity metricEntity = MetricEntity.createWithNoDimensions(
+    Set<VeniceMetricsDimensions> dims = new HashSet<>();
+    dims.add(VeniceMetricsDimensions.VENICE_STORE_NAME);
+    MetricEntity metricEntity = MetricEntity.createWithCustomPrefix(
         "test_metric",
         MetricType.COUNTER,
         MetricUnit.NUMBER,
         "Test metric",
+        dims,
         "test_custom_prefix");
     metricPrefix = metricsRepository.getMetricPrefix(metricEntity);
     assertNotNull(metricPrefix, "Metric prefix should not be null");
@@ -696,13 +741,47 @@ public class VeniceOpenTelemetryMetricsRepositoryTest {
     assertNotNull(data1.getAttributes(), "MetricAttributesData should have Attributes");
     assertTrue(data2.hasAdder(), "MetricAttributesData should have a LongAdder for ASYNC_COUNTER_FOR_HIGH_PERF_CASES");
 
-    // Verify accumulated values (30 for first combination, 5 for second)
-    assertEquals(data1.sumThenReset(), 30L, "Should have accumulated 10 + 20 = 30");
-    assertEquals(data2.sumThenReset(), 5L, "Should have accumulated 5");
+    // Verify accumulated values via sum() (cumulative, non-destructive)
+    assertEquals(data1.sum(), 30L, "Should have accumulated 10 + 20 = 30");
+    assertEquals(data2.sum(), 5L, "Should have accumulated 5");
 
-    // After sumThenReset, values should be 0
-    assertEquals(data1.sumThenReset(), 0L, "Should be 0 after reset");
-    assertEquals(data2.sumThenReset(), 0L, "Should be 0 after reset");
+    // sum() is non-destructive — calling it again returns the same value
+    assertEquals(data1.sum(), 30L, "sum() should be non-destructive");
+    assertEquals(data2.sum(), 5L, "sum() should be non-destructive");
+  }
+
+  /** Verifies that recording a negative value to a monotonic async counter is silently dropped. */
+  @Test
+  public void testAsyncCounterDropsNegativeValue() {
+    MetricEntity metricEntity = createAsyncCounterMetricEntity("test_async_counter_negative");
+    MetricEntityStateThreeEnums<HttpResponseStatusEnum, HttpResponseStatusCodeCategory, RequestType> metricState =
+        createAsyncCounterMetricState(metricEntity, metricsRepository);
+
+    // Record a positive value first
+    metricState.record(10L, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+    // Attempt a negative recording — should be dropped, not accumulated
+    metricState.record(-5L, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+
+    MetricAttributesData data = metricState.getMetricAttributesDataEnumMap()
+        .get(HttpResponseStatusEnum.OK)
+        .get(HttpResponseStatusCodeCategory.SUCCESS)
+        .get(RequestType.SINGLE_GET);
+    assertEquals(data.sum(), 10L, "Negative recording should be dropped; sum should remain 10");
+  }
+
+  /** Verifies that recording a negative value to an up-down counter is allowed. */
+  @Test
+  public void testAsyncUpDownCounterAllowsNegativeValue() {
+    MetricEntity metricEntity = createAsyncUpDownCounterMetricEntity("test_async_updown_negative");
+    MetricEntityStateThreeEnums<HttpResponseStatusEnum, HttpResponseStatusCodeCategory, RequestType> metricState =
+        createAsyncUpDownCounterMetricState(metricEntity, metricsRepository);
+    // Should not throw
+    metricState.record(-5L, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+    MetricAttributesData data = metricState.getMetricAttributesDataEnumMap()
+        .get(HttpResponseStatusEnum.OK)
+        .get(HttpResponseStatusCodeCategory.SUCCESS)
+        .get(RequestType.SINGLE_GET);
+    assertEquals(data.sum(), -5L, "Up-down counter should accept negative values");
   }
 
   /**
@@ -745,7 +824,6 @@ public class VeniceOpenTelemetryMetricsRepositoryTest {
               .build();
 
       // Record and validate OK/SUCCESS/SINGLE_GET combination (100 + 50 = 150)
-      // Note: Each collectAllMetrics() call triggers sumThenReset(), so we validate one combination at a time
       metricState
           .record(100L, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
       metricState
@@ -759,17 +837,18 @@ public class VeniceOpenTelemetryMetricsRepositoryTest {
           HttpResponseStatusEnum.INTERNAL_SERVER_ERROR,
           HttpResponseStatusCodeCategory.SERVER_ERROR,
           RequestType.MULTI_GET);
+      // Cumulative: error=25, okSuccess still=150 from previous recordings
       OpenTelemetryDataTestUtils
           .validateObservableCounterValue(inMemoryMetricReader, 25L, errorAttributes, metricName, TEST_PREFIX);
 
-      // Record more values and validate again to verify reset behavior
+      // Record more values and validate cumulative behavior
       metricState
           .record(200L, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
 
-      // After collection, the value should reflect only the new recording (200)
-      // because sumThenReset() resets the LongAdder after each collection
+      // Cumulative total for OK/SUCCESS/SINGLE_GET: 100 + 50 + 200 = 350
+      // (sum() reports running total, not just the latest recording)
       OpenTelemetryDataTestUtils
-          .validateObservableCounterValue(inMemoryMetricReader, 200L, okSuccessAttributes, metricName, TEST_PREFIX);
+          .validateObservableCounterValue(inMemoryMetricReader, 350L, okSuccessAttributes, metricName, TEST_PREFIX);
 
     } finally {
       otelRepo.close();
@@ -844,16 +923,16 @@ public class VeniceOpenTelemetryMetricsRepositoryTest {
         data1.hasAdder(),
         "MetricAttributesData should have a LongAdder for ASYNC_UP_DOWN_COUNTER_FOR_HIGH_PERF_CASES");
 
-    // Verify accumulated values (10 + 20 - 5 = 25)
-    assertEquals(data1.sumThenReset(), 25L, "Should have accumulated 10 + 20 - 5 = 25");
+    // Verify accumulated value via sum() (cumulative, non-destructive)
+    assertEquals(data1.sum(), 25L, "Should have accumulated 10 + 20 - 5 = 25");
 
-    // After sumThenReset, values should be 0
-    assertEquals(data1.sumThenReset(), 0L, "Should be 0 after reset");
+    // sum() is non-destructive — calling it again returns the same value
+    assertEquals(data1.sum(), 25L, "sum() should be non-destructive");
 
-    // Test negative-only accumulation
+    // Test negative accumulation: 25 + (-100) = -75
     metricState
         .record(-100L, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
-    assertEquals(data1.sumThenReset(), -100L, "Should support negative accumulation");
+    assertEquals(data1.sum(), -75L, "Should support negative accumulation: 25 + (-100) = -75");
   }
 
   /**
@@ -1050,8 +1129,8 @@ public class VeniceOpenTelemetryMetricsRepositoryTest {
       Attributes storeBAttributes =
           new OpenTelemetryDataTestUtils.OpenTelemetryAttributesBuilder().setStoreName("store_B").build();
 
-      otelRepo.createAsyncLongGauge(metricEntity, () -> 42L, storeAAttributes);
-      otelRepo.createAsyncLongGauge(metricEntity, () -> 99L, storeBAttributes);
+      otelRepo.registerObservableLongGauge(metricEntity, measurement -> measurement.record(42L, storeAAttributes));
+      otelRepo.registerObservableLongGauge(metricEntity, measurement -> measurement.record(99L, storeBAttributes));
 
       Collection<MetricData> metricsData = inMemoryMetricReader.collectAllMetrics();
 
@@ -1102,13 +1181,16 @@ public class VeniceOpenTelemetryMetricsRepositoryTest {
       Map<VeniceMetricsDimensions, String> baseDimensionsMap = new HashMap<>();
       baseDimensionsMap.put(VeniceMetricsDimensions.VENICE_STORE_NAME, "test_store");
 
-      // Each VersionRole gets a distinct callback value: BACKUP=10, CURRENT=20, FUTURE=30
+      // Each VersionRole gets a distinct callback value: BACKUP=10, CURRENT=20, FUTURE=30. The
+      // liveStateResolver returns the role itself as the state (always live); the valueResolver
+      // derives the value from the role.
       AsyncMetricEntityStateOneEnum<VersionRole> metricState = AsyncMetricEntityStateOneEnum.create(
           metricEntity,
           otelRepo,
           baseDimensionsMap,
           VersionRole.class,
-          role -> () -> (role.ordinal() + 1) * 10L);
+          role -> role,
+          (state, role) -> (role.ordinal() + 1) * 10L);
 
       assertNotNull(metricState);
 
@@ -1177,4 +1259,319 @@ public class VeniceOpenTelemetryMetricsRepositoryTest {
       otelRepo.close();
     }
   }
+
+  /** Creates a VeniceOpenTelemetryMetricsRepository with the given reader for test use. */
+  private static VeniceOpenTelemetryMetricsRepository createOtelRepoForTest(InMemoryMetricReader reader) {
+    VeniceMetricsConfig config = new VeniceMetricsConfig.Builder().setServiceName("test_service")
+        .setMetricPrefix(TEST_PREFIX)
+        .setEmitOtelMetrics(true)
+        .setExportOtelMetricsToEndpoint(false)
+        .setUseOtelExponentialHistogram(false)
+        .setOtelAdditionalMetricsReader(reader)
+        .build();
+    return new VeniceOpenTelemetryMetricsRepository(config);
+  }
+
+  /** Builds the standard OK/SUCCESS/SINGLE_GET test attributes with the default store name. */
+  private static Attributes buildOkSingleGetAttributes() {
+    return new OpenTelemetryDataTestUtils.OpenTelemetryAttributesBuilder().setStoreName(TEST_STORE_NAME)
+        .setHttpStatus(HttpResponseStatusEnum.OK)
+        .setRequestType(RequestType.SINGLE_GET)
+        .build();
+  }
+
+  /**
+   * Verifies ASYNC_COUNTER_FOR_HIGH_PERF_CASES produces correct data under both DELTA and
+   * CUMULATIVE temporality across multiple collection intervals with varying traffic.
+   *
+   * <p>Production uses {@code deltaPreferred()} temporality. Before the fix (using
+   * {@code sumThenReset()} in the {@code ObservableLongCounter} callback), the OTel SDK computed
+   * delta-of-delta, producing negative counter values when traffic varied between intervals.
+   * The fix ({@code sum()}) reports cumulative observations so the SDK correctly computes deltas.
+   */
+  @Test
+  public void testAsyncCounterMultiCollection() {
+    String metricName = "test_counter_multi";
+    MetricEntity entity = createAsyncCounterMetricEntity(metricName);
+    OpenTelemetryDataTestUtils.validateAsyncCounterMultiCollection(
+        TEST_PREFIX,
+        singletonList(entity),
+        metricName,
+        buildOkSingleGetAttributes(),
+        repo -> {
+          MetricEntityStateThreeEnums<HttpResponseStatusEnum, HttpResponseStatusCodeCategory, RequestType> state =
+              createAsyncCounterMetricState(entity, repo.getOpenTelemetryMetricsRepository());
+          return n -> state
+              .record(n, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+        },
+        new long[] { 500, 200, 800, 100, 300 });
+  }
+
+  /**
+   * Verifies ASYNC_UP_DOWN_COUNTER_FOR_HIGH_PERF_CASES produces correct data under both DELTA
+   * and CUMULATIVE temporality, including net-negative periods.
+   */
+  @Test
+  public void testAsyncUpDownCounterMultiCollection() {
+    String metricName = "test_updown_multi";
+    MetricEntity entity = createAsyncUpDownCounterMetricEntity(metricName);
+    OpenTelemetryDataTestUtils.validateAsyncUpDownCounterMultiCollection(
+        TEST_PREFIX,
+        singletonList(entity),
+        metricName,
+        buildOkSingleGetAttributes(),
+        repo -> {
+          MetricEntityStateThreeEnums<HttpResponseStatusEnum, HttpResponseStatusCodeCategory, RequestType> state =
+              createAsyncUpDownCounterMetricState(entity, repo.getOpenTelemetryMetricsRepository());
+          return n -> state
+              .record(n, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+        },
+        new long[] { 10, -7, 5, -3, 12 });
+  }
+
+  /**
+   * Verifies that a monotonic async counter correctly reports when cumulative sum is zero
+   * (no events recorded yet). Zero is a valid cumulative value and must be observed by the SDK
+   * so it can compute correct deltas when events start arriving in later periods.
+   */
+  @Test
+  public void testAsyncCounterReportsZeroCumulativeSum() {
+    // Pattern: 0 (no events), 5, 0 (no new events), 3
+    // Cumulative sums: 0, 5, 5, 8
+    String metricName = "test_counter_zero";
+    MetricEntity entity = createAsyncCounterMetricEntity(metricName);
+    OpenTelemetryDataTestUtils.validateAsyncCounterMultiCollection(
+        TEST_PREFIX,
+        singletonList(entity),
+        metricName,
+        buildOkSingleGetAttributes(),
+        repo -> {
+          MetricEntityStateThreeEnums<HttpResponseStatusEnum, HttpResponseStatusCodeCategory, RequestType> state =
+              createAsyncCounterMetricState(entity, repo.getOpenTelemetryMetricsRepository());
+          return n -> state
+              .record(n, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+        },
+        new long[] { 0, 5, 0, 3 });
+  }
+
+  /**
+   * Verifies that an up-down counter correctly reports when cumulative sum returns to zero.
+   * A cumulative sum of 0 is a legitimate value (e.g., all increments cancelled by decrements)
+   * and must be reported so the SDK computes the correct delta.
+   */
+  @Test
+  public void testAsyncUpDownCounterReportsZeroCumulativeSum() {
+    // Pattern: +10, -10 → cumulative sum is 0 after period 2, then +5 → cumulative is 5
+    String metricName = "test_updown_zero";
+    MetricEntity entity = createAsyncUpDownCounterMetricEntity(metricName);
+    OpenTelemetryDataTestUtils.validateAsyncUpDownCounterMultiCollection(
+        TEST_PREFIX,
+        singletonList(entity),
+        metricName,
+        buildOkSingleGetAttributes(),
+        repo -> {
+          MetricEntityStateThreeEnums<HttpResponseStatusEnum, HttpResponseStatusCodeCategory, RequestType> state =
+              createAsyncUpDownCounterMetricState(entity, repo.getOpenTelemetryMetricsRepository());
+          return n -> state
+              .record(n, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+        },
+        new long[] { 10, -10, 5 });
+  }
+
+  /**
+   * Verifies that multiple stores sharing the same ASYNC_COUNTER metric name produce correct
+   * independent deltas under DELTA temporality, with no cross-contamination between stores.
+   */
+  @Test
+  public void testMultipleCallbacksDeltaTemporalityIsolation() {
+    InMemoryMetricReader deltaReader = InMemoryMetricReader.createDelta();
+    VeniceOpenTelemetryMetricsRepository otelRepo = createOtelRepoForTest(deltaReader);
+
+    try {
+      String metricName = "test_multi_store_delta";
+      MetricEntity metricEntity = createAsyncCounterMetricEntity(metricName);
+
+      // Create two stores with separate metric states
+      Map<VeniceMetricsDimensions, String> storeADims = new HashMap<>();
+      storeADims.put(VeniceMetricsDimensions.VENICE_STORE_NAME, "store_A");
+      MetricEntityStateThreeEnums<HttpResponseStatusEnum, HttpResponseStatusCodeCategory, RequestType> stateA =
+          MetricEntityStateThreeEnums.create(
+              metricEntity,
+              otelRepo,
+              storeADims,
+              HttpResponseStatusEnum.class,
+              HttpResponseStatusCodeCategory.class,
+              RequestType.class);
+
+      Map<VeniceMetricsDimensions, String> storeBDims = new HashMap<>();
+      storeBDims.put(VeniceMetricsDimensions.VENICE_STORE_NAME, "store_B");
+      MetricEntityStateThreeEnums<HttpResponseStatusEnum, HttpResponseStatusCodeCategory, RequestType> stateB =
+          MetricEntityStateThreeEnums.create(
+              metricEntity,
+              otelRepo,
+              storeBDims,
+              HttpResponseStatusEnum.class,
+              HttpResponseStatusCodeCategory.class,
+              RequestType.class);
+
+      Attributes storeAAttrs = new OpenTelemetryDataTestUtils.OpenTelemetryAttributesBuilder().setStoreName("store_A")
+          .setHttpStatus(HttpResponseStatusEnum.OK)
+          .setRequestType(RequestType.SINGLE_GET)
+          .build();
+      Attributes storeBAttrs = new OpenTelemetryDataTestUtils.OpenTelemetryAttributesBuilder().setStoreName("store_B")
+          .setHttpStatus(HttpResponseStatusEnum.OK)
+          .setRequestType(RequestType.SINGLE_GET)
+          .build();
+
+      // Period 1: store A=300, store B=100
+      stateA.record(300L, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+      stateB.record(100L, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+      Collection<MetricData> p1 = deltaReader.collectAllMetrics();
+      assertEquals(
+          OpenTelemetryDataTestUtils.getLongPointDataFromSum(p1, metricName, TEST_PREFIX, storeAAttrs).getValue(),
+          300L);
+      assertEquals(
+          OpenTelemetryDataTestUtils.getLongPointDataFromSum(p1, metricName, TEST_PREFIX, storeBAttrs).getValue(),
+          100L);
+
+      // Period 2: store A=50 (decreased), store B=400 (increased) — both should have correct positive deltas
+      stateA.record(50L, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+      stateB.record(400L, HttpResponseStatusEnum.OK, HttpResponseStatusCodeCategory.SUCCESS, RequestType.SINGLE_GET);
+      Collection<MetricData> p2 = deltaReader.collectAllMetrics();
+      LongPointData p2a = OpenTelemetryDataTestUtils.getLongPointDataFromSum(p2, metricName, TEST_PREFIX, storeAAttrs);
+      LongPointData p2b = OpenTelemetryDataTestUtils.getLongPointDataFromSum(p2, metricName, TEST_PREFIX, storeBAttrs);
+      assertNotNull(p2a);
+      assertNotNull(p2b);
+      assertTrue(p2a.getValue() > 0, "Store A delta must be positive, got: " + p2a.getValue());
+      assertEquals(p2a.getValue(), 50L, "Store A period 2 delta should be 50");
+      assertEquals(p2b.getValue(), 400L, "Store B period 2 delta should be 400");
+    } finally {
+      otelRepo.close();
+    }
+  }
+
+  /** Builds a minimal counter MetricEntity for failure-metric attribution tests. */
+  private static MetricEntity dummyCounterEntity(String name) {
+    return new MetricEntity(
+        name,
+        MetricType.COUNTER,
+        MetricUnit.NUMBER,
+        "desc",
+        Collections.singleton(VeniceMetricsDimensions.VENICE_STORE_NAME));
+  }
+
+  /** Builds the {@code venice.metric.name=name} attribute set used to look up failure data points. */
+  private static Attributes failureAttrsFor(String name) {
+    return Attributes.of(AttributeKey.stringKey("venice.metric.name"), name);
+  }
+
+  /** Looks up the per-metric-name failure point for {@code name}. */
+  private static LongPointData lookupFailurePoint(Collection<MetricData> metricsData, String name) {
+    return OpenTelemetryDataTestUtils
+        .getLongPointDataFromSum(metricsData, "metric_record_failure", "internal", failureAttrsFor(name));
+  }
+
+  /**
+   * Verifies recordFailureMetric attaches a {@code venice.metric.name} dimension carrying the
+   * failing metric's name, so two failures on different metrics produce two distinct data points
+   * and repeated failures on the same metric accumulate on its data point.
+   */
+  @Test
+  public void testRecordFailureMetricCarriesPerMetricNameAttribution() {
+    InMemoryMetricReader inMemoryMetricReader = InMemoryMetricReader.create();
+    VeniceOpenTelemetryMetricsRepository otelRepo = createOtelRepoForTest(inMemoryMetricReader);
+    try {
+      MetricEntity metricA = dummyCounterEntity("metric_a");
+      MetricEntity metricB = dummyCounterEntity("metric_b");
+
+      otelRepo.recordFailureMetric(metricA, new NullPointerException("boom"));
+      otelRepo.recordFailureMetric(metricA, new IllegalStateException("boom2"));
+      otelRepo.recordFailureMetric(metricB, new IllegalArgumentException("bad input"));
+
+      Collection<MetricData> metricsData = inMemoryMetricReader.collectAllMetrics();
+      LongPointData pointA = lookupFailurePoint(metricsData, "metric_a");
+      LongPointData pointB = lookupFailurePoint(metricsData, "metric_b");
+      assertNotNull(pointA, "Failure data point for metric_a should be present");
+      assertEquals(pointA.getValue(), 2L, "metric_a should have accumulated 2 failures");
+      assertNotNull(pointB, "Failure data point for metric_b should be present");
+      assertEquals(pointB.getValue(), 1L, "metric_b should have accumulated 1 failure");
+    } finally {
+      otelRepo.close();
+    }
+  }
+
+  /**
+   * Verifies the String-error overload of recordFailureMetric (used by validation paths in
+   * MetricEntityStateGeneric) also attaches the {@code venice.metric.name} dimension and
+   * accumulates per metric.
+   */
+  @Test
+  public void testRecordFailureMetricStringOverloadCarriesPerMetricNameAttribution() {
+    InMemoryMetricReader inMemoryMetricReader = InMemoryMetricReader.create();
+    VeniceOpenTelemetryMetricsRepository otelRepo = createOtelRepoForTest(inMemoryMetricReader);
+    try {
+      MetricEntity metricA = dummyCounterEntity("metric_a");
+      MetricEntity metricB = dummyCounterEntity("metric_b");
+
+      otelRepo.recordFailureMetric(metricA, "validation_error_1");
+      otelRepo.recordFailureMetric(metricB, "validation_error_2");
+      otelRepo.recordFailureMetric(metricB, "validation_error_3");
+
+      Collection<MetricData> metricsData = inMemoryMetricReader.collectAllMetrics();
+      LongPointData pointA = lookupFailurePoint(metricsData, "metric_a");
+      LongPointData pointB = lookupFailurePoint(metricsData, "metric_b");
+      assertNotNull(pointA);
+      assertEquals(pointA.getValue(), 1L);
+      assertNotNull(pointB);
+      assertEquals(pointB.getValue(), 2L);
+    } finally {
+      otelRepo.close();
+    }
+  }
+
+  /**
+   * Verifies recordFailureMetric does not throw when the exception's message is {@code null}
+   * (e.g., {@link NullPointerException} thrown without a message), which is a common case for
+   * SDK-side NPEs surfaced through observable callbacks.
+   */
+  @Test
+  public void testRecordFailureMetricToleratesNullExceptionMessage() {
+    InMemoryMetricReader inMemoryMetricReader = InMemoryMetricReader.create();
+    VeniceOpenTelemetryMetricsRepository otelRepo = createOtelRepoForTest(inMemoryMetricReader);
+    try {
+      MetricEntity metricA = dummyCounterEntity("metric_a");
+      otelRepo.recordFailureMetric(metricA, new NullPointerException());
+      otelRepo.recordFailureMetric(metricA, new NullPointerException());
+
+      Collection<MetricData> metricsData = inMemoryMetricReader.collectAllMetrics();
+      LongPointData pointA = lookupFailurePoint(metricsData, "metric_a");
+      assertNotNull(pointA, "Failure data point should be present despite null exception messages");
+      assertEquals(pointA.getValue(), 2L, "Both null-message NPEs should accumulate");
+    } finally {
+      otelRepo.close();
+    }
+  }
+
+  /**
+   * Verifies that the Exception and String overloads of recordFailureMetric accumulate into the
+   * same per-metric data point when both fire on the same {@link MetricEntity}.
+   */
+  @Test
+  public void testRecordFailureMetricBothOverloadsAccumulateIntoSameDataPoint() {
+    InMemoryMetricReader inMemoryMetricReader = InMemoryMetricReader.create();
+    VeniceOpenTelemetryMetricsRepository otelRepo = createOtelRepoForTest(inMemoryMetricReader);
+    try {
+      MetricEntity metricA = dummyCounterEntity("metric_a");
+      otelRepo.recordFailureMetric(metricA, new IllegalStateException("ex"));
+      otelRepo.recordFailureMetric(metricA, "string_error");
+
+      Collection<MetricData> metricsData = inMemoryMetricReader.collectAllMetrics();
+      LongPointData pointA = lookupFailurePoint(metricsData, "metric_a");
+      assertNotNull(pointA);
+      assertEquals(pointA.getValue(), 2L, "Exception + String overloads must share the same per-metric data point");
+    } finally {
+      otelRepo.close();
+    }
+  }
+
 }

@@ -5,6 +5,7 @@ import static com.linkedin.davinci.stats.IngestionStats.BATCH_PROCESSING_REQUEST
 import static com.linkedin.davinci.stats.IngestionStats.BATCH_PROCESSING_REQUEST_LATENCY;
 import static com.linkedin.davinci.stats.IngestionStats.BATCH_PROCESSING_REQUEST_RECORDS;
 import static com.linkedin.davinci.stats.IngestionStats.BATCH_PROCESSING_REQUEST_SIZE;
+import static com.linkedin.venice.offsets.OffsetRecord.ACTIVE_KEY_COUNT_NOT_TRACKED;
 
 import com.linkedin.davinci.config.VeniceServerConfig;
 import com.linkedin.davinci.kafka.consumer.PartitionConsumptionState;
@@ -163,6 +164,7 @@ public class HostLevelIngestionStats extends AbstractVeniceStats {
    * Measure the count of tombstones created
    */
   private final LongAdderRateGauge totalTombstoneCreationDCRRate;
+  private final LongAdderRateGauge totalActiveKeyCountInvalidationRate;
 
   private final Sensor leaderProduceLatencySensor;
   private final Sensor leaderCompressLatencySensor;
@@ -248,6 +250,12 @@ public class HostLevelIngestionStats extends AbstractVeniceStats {
         () -> totalStats.totalTombstoneCreationDCRRate,
         time);
 
+    this.totalActiveKeyCountInvalidationRate = registerOnlyTotalRate(
+        "active_key_count_invalidation",
+        totalStats,
+        () -> totalStats.totalActiveKeyCountInvalidationRate,
+        time);
+
     this.totalTimestampRegressionDCRErrorRate = registerOnlyTotalRate(
         "timestamp_regression_dcr_error",
         totalStats,
@@ -301,6 +309,28 @@ public class HostLevelIngestionStats extends AbstractVeniceStats {
     // Register a metric that records the size of ingestion tasks count
     if (isTotalStats) {
       registerSensor(new AsyncGauge((ignored, ignored2) -> ingestionTaskMap.size(), "ingestion_task_count"));
+    }
+
+    // Active key count gauge. ACTIVE_KEY_COUNT_NOT_TRACKED = not tracked, 0 = tracked but empty.
+    // Cannot use measurable() because its 0-fallback conflates "untracked" with "empty".
+    if (isTotalStats) {
+      registerSensor(new AsyncGauge((ignored, ignored2) -> {
+        long total = 0;
+        boolean anyTracked = false;
+        for (StoreIngestionTask task: ingestionTaskMap.values()) {
+          long storeCount = task.getActiveKeyCount();
+          if (storeCount != ACTIVE_KEY_COUNT_NOT_TRACKED) {
+            anyTracked = true;
+            total += storeCount;
+          }
+        }
+        return anyTracked ? total : ACTIVE_KEY_COUNT_NOT_TRACKED;
+      }, "active_key_count"));
+    } else {
+      registerSensor(new AsyncGauge((ignored, ignored2) -> {
+        StoreIngestionTask sit = ingestionTaskMap.get(storeName);
+        return sit == null ? ACTIVE_KEY_COUNT_NOT_TRACKED : sit.getActiveKeyCount();
+      }, "active_key_count"));
     }
 
     // Stats which are per-store only:
@@ -717,6 +747,10 @@ public class HostLevelIngestionStats extends AbstractVeniceStats {
 
   public void recordTombstoneCreatedDCR() {
     totalTombstoneCreationDCRRate.record();
+  }
+
+  public void recordActiveKeyCountInvalidation() {
+    totalActiveKeyCountInvalidationRate.record();
   }
 
   public void recordTotalLeaderBytesConsumed(long bytes) {

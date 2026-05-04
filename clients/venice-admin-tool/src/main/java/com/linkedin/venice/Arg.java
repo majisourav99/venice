@@ -145,6 +145,13 @@ public enum Arg {
       "backup-strategy", "bus", true,
       "Strategies to preserve backup versions, eg KEEP_MIN_VERSIONS, DELETE_ON_NEW_PUSH_START. Default is KEEP_MIN_VERSIONS"
   ),
+  INGESTION_PAUSE_MODE(
+      "ingestion-pause-mode", "ipm", true, "Ingestion pause mode. Values: NOT_PAUSED, CURRENT_VERSION, ALL_VERSIONS"
+  ),
+  INGESTION_PAUSED_REGIONS(
+      "ingestion-paused-regions", "ipr", true,
+      "Comma-separated list of fabrics to pause (e.g. prod-lor1,prod-ltx1). Empty = all regions"
+  ),
   AUTO_SCHEMA_REGISTER_FOR_PUSHJOB_ENABLED(
       "auto-schema-register-push-job-enabled", "asp", true, "whether or not to use auto-schema register for pushjob"
   ),
@@ -233,6 +240,10 @@ public enum Arg {
   ), KAFKA_TOPIC_MIN_IN_SYNC_REPLICA("kafka-topic-min-in-sync-replica", "ktmisr", true, "Kafka topic minISR config"),
   KAFKA_RT_TOPICS_MIN_IN_SYNC_REPLICAS(
       "kafka-rt-topic-min-in-sync-replica", "krtmisr", true, "Kafka topic rt minISR config"
+  ),
+  KAFKA_TOPIC_UNCLEAN_LEADER_ELECTION_ENABLED(
+      "kafka-topic-unclean-leader-election-enabled", "ktulee", true,
+      "Enable/disable Kafka unclean leader election for a topic"
   ),
   CHILD_CONTROLLER_ADMIN_TOPIC_CONSUMPTION_ENABLED(
       ConfigKeys.CHILD_CONTROLLER_ADMIN_TOPIC_CONSUMPTION_ENABLED, "atc", true,

@@ -21,6 +21,7 @@ import com.linkedin.venice.pubsub.api.PubSubTopic;
 import com.linkedin.venice.pubsub.api.PubSubTopicPartition;
 import com.linkedin.venice.serialization.avro.AvroProtocolDefinition;
 import com.linkedin.venice.storage.protocol.ChunkedValueManifest;
+import com.linkedin.venice.utils.ArrayUtils;
 import com.linkedin.venice.utils.LatencyUtils;
 import com.linkedin.venice.utils.concurrent.VeniceConcurrentHashMap;
 import com.linkedin.venice.utils.lazy.Lazy;
@@ -34,10 +35,14 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.util.Utf8;
+import org.apache.datasketches.hll.HllSketch;
+import org.apache.datasketches.hll.TgtHllType;
+import org.apache.datasketches.memory.Memory;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -158,6 +163,27 @@ public class PartitionConsumptionState {
    * update offset db for every record.
    */
   private long processedRecordSizeSinceLastSync;
+
+  /**
+   * Tracks bytes consumed per source key (VT name or RT broker URL) since the last Global RT DIV sync.
+   * Stored per-partition so that each partition's sync cadence is independent.
+   */
+  private final Map<String, Long> consumedBytesSinceLastGlobalRtDivSync = new VeniceConcurrentHashMap<>();
+
+  /** Minimum lgK supported by DataSketches HllSketch (mirrors package-private HllUtil.MIN_LOG_K). */
+  static final int HLL_MIN_LOG_K = 4;
+  /** Maximum lgK supported by DataSketches HllSketch (mirrors package-private HllUtil.MAX_LOG_K). */
+  static final int HLL_MAX_LOG_K = 21;
+  /** Default lgK for HLL sketches. ~8KB memory, ~1.15% error. */
+  public static final int HLL_DEFAULT_LOG_K = 13;
+
+  /**
+   * HyperLogLog sketch estimating unique keys ever put or deleted in this partition.
+   * Monotonically increasing; resets on new version push.
+   * Null when HLL tracking is disabled. Set via {@link #initializeUniqueKeyCountHll(int)}
+   * or {@link #restoreUniqueKeyCountHll(int)}.
+   */
+  private HllSketch uniqueIngestedKeyCountHll;
 
   /**
    * An in-memory state to track whether the leader consumer is consuming from remote or not; it will be updated with
@@ -324,6 +350,16 @@ public class PartitionConsumptionState {
    */
   private final Map<String, HeartbeatKey> cachedHeartbeatKeys;
 
+  /**
+   * Active logical key count. Batch phase: incremented per logical PUT. RT phase (hybrid A/A):
+   * adjusted by +1/-1 signals from conflict resolution. {@link OffsetRecord#ACTIVE_KEY_COUNT_NOT_TRACKED} = not tracked
+   * (no batch baseline); RT signals are skipped when not tracked. AtomicLong for AA/WC parallel processing.
+   */
+  private final AtomicLong activeKeyCount = new AtomicLong(OffsetRecord.ACTIVE_KEY_COUNT_NOT_TRACKED);
+  /** Last PUT key for batch dedup. Not persisted; used by {@link #incrementActiveKeyCountForBatchRecord}.
+   *  Single-threaded: only accessed from the drainer thread during batch (pre-EOP). */
+  private byte[] lastBatchKeyForDedup;
+
   /** Lazily allocated per-partition detector for partial-update amplification. */
   private volatile PartialUpdateAmplificationDetector partialUpdateAmplificationDetector;
 
@@ -391,6 +427,172 @@ public class PartitionConsumptionState {
     this.lastLeaderCompleteStateUpdateInMs = 0;
     this.pendingReportIncPushVersionList = offsetRecord.getPendingReportIncPushVersionList();
     this.hasResubscribedAfterBootstrapAsCurrentVersion = false;
+    this.activeKeyCount.set(offsetRecord.getActiveKeyCount());
+  }
+
+  /** Create a fresh HLL sketch with {@link #HLL_DEFAULT_LOG_K}. */
+  public void initializeUniqueKeyCountHll() {
+    initializeUniqueKeyCountHll(HLL_DEFAULT_LOG_K);
+  }
+
+  /**
+   * Create a fresh HLL sketch for a new partition subscription.
+   *
+   * @param lgK log-base-2 of K (clamped to [{@link #HLL_MIN_LOG_K}, {@link #HLL_MAX_LOG_K}])
+   */
+  public void initializeUniqueKeyCountHll(int lgK) {
+    lgK = clampLgK(lgK);
+    this.uniqueIngestedKeyCountHll = new HllSketch(lgK, TgtHllType.HLL_4);
+  }
+
+  /** Restore the HLL sketch from checkpoint using {@link #HLL_DEFAULT_LOG_K} for mismatch detection. */
+  public void restoreUniqueKeyCountHll() {
+    restoreUniqueKeyCountHll(HLL_DEFAULT_LOG_K);
+  }
+
+  /**
+   * Restore the HLL sketch from the offset record checkpoint.
+   * Logs a warning if the restored lgK differs from the configured lgK.
+   *
+   * @param lgK configured log-base-2 of K (used only for mismatch detection)
+   */
+  public void restoreUniqueKeyCountHll(int lgK) {
+    lgK = clampLgK(lgK);
+    ByteBuffer hllBytes = offsetRecord.getUniqueIngestedKeyCountHllSketch();
+    if (hllBytes == null || hllBytes.remaining() == 0) {
+      LOGGER.warn("Partition {} has no HLL checkpoint data to restore.", getPartition());
+      return;
+    }
+    restoreUniqueKeyCountHllFromCheckpoint(lgK, hllBytes);
+  }
+
+  public long getActiveKeyCount() {
+    return activeKeyCount.get();
+  }
+
+  public void setActiveKeyCount(long count) {
+    activeKeyCount.set(count);
+  }
+
+  public void incrementActiveKeyCount() {
+    activeKeyCount.incrementAndGet();
+  }
+
+  /**
+   * Called at SOP to mark this partition as actively counting. Without this, a mid-batch
+   * restart with a newly enabled config would start counting partway through, producing
+   * an inaccurate partial count. On restart, SOP is not re-processed (already past the
+   * checkpoint), so the count stays at {@link OffsetRecord#ACTIVE_KEY_COUNT_NOT_TRACKED} and batch
+   * records are skipped by {@link #incrementActiveKeyCountForBatchRecord}.
+   */
+  public void initializeActiveKeyCount() {
+    activeKeyCount.compareAndSet(OffsetRecord.ACTIVE_KEY_COUNT_NOT_TRACKED, 0);
+  }
+
+  /**
+   * Decrements activeKeyCount. If the count is already at 0, this indicates drift
+   * (more deletes than creates), so we invalidate to {@link OffsetRecord#ACTIVE_KEY_COUNT_NOT_TRACKED}
+   * rather than continue tracking with a wrong baseline. If already not tracked, stays not tracked.
+   *
+   * @return true if the count was successfully decremented, false if invalidated or already invalid
+   */
+  public boolean decrementActiveKeyCount() {
+    long prev = activeKeyCount.getAndUpdate(v -> v > 0 ? v - 1 : OffsetRecord.ACTIVE_KEY_COUNT_NOT_TRACKED);
+    return prev > 0;
+  }
+
+  /**
+   * Increments activeKeyCount for a batch PUT, skipping speculative execution duplicates
+   * (key &lt;= last key). Only PUTs call this — DELETEs are tombstones and excluded.
+   * Requires prior {@link #initializeActiveKeyCount()} at SOP; skips if not initialized
+   * (mid-batch config enablement). Checkpoint-safe: partial counts are persisted.
+   */
+  public void incrementActiveKeyCountForBatchRecord(byte[] keyBytes) {
+    if (activeKeyCount.get() < 0) {
+      return; // Not initialized at SOP — mid-batch config enablement, skip
+    }
+    if (lastBatchKeyForDedup != null && ArrayUtils.compareUnsigned(keyBytes, lastBatchKeyForDedup) <= 0) {
+      return; // Speculative execution duplicate — key order went backwards
+    }
+    lastBatchKeyForDedup = keyBytes;
+    activeKeyCount.incrementAndGet();
+  }
+
+  /**
+   * Called at EOP. Releases dedup state. Empty partitions are already at 0 from
+   * {@link #initializeActiveKeyCount()} at SOP. If SOP was missed (mid-batch config enablement),
+   * the count stays at {@link OffsetRecord#ACTIVE_KEY_COUNT_NOT_TRACKED} — no partial baseline is created.
+   */
+  public void cleanupBatchKeyCountState() {
+    lastBatchKeyForDedup = null; // Release reference; dedup is only needed during batch
+  }
+
+  // --- HLL unique ingested key count methods ---
+
+  private void restoreUniqueKeyCountHllFromCheckpoint(int lgK, ByteBuffer hllBytes) {
+    byte[] bytes = new byte[hllBytes.remaining()];
+    hllBytes.duplicate().get(bytes);
+    this.uniqueIngestedKeyCountHll = HllSketch.heapify(Memory.wrap(bytes));
+    int restoredLgK = this.uniqueIngestedKeyCountHll.getLgConfigK();
+    if (restoredLgK != lgK) {
+      LOGGER.warn(
+          "Partition {} HLL restored with lgK={}, configured lgK={}. Keeping restored sketch.",
+          getPartition(),
+          restoredLgK,
+          lgK);
+    }
+  }
+
+  private int clampLgK(int lgK) {
+    if (lgK < HLL_MIN_LOG_K || lgK > HLL_MAX_LOG_K) {
+      int clamped = Math.max(HLL_MIN_LOG_K, Math.min(HLL_MAX_LOG_K, lgK));
+      LOGGER.warn(
+          "Partition {} HLL lgK={} is out of valid range [{}, {}]. Clamping to {}.",
+          getPartition(),
+          lgK,
+          HLL_MIN_LOG_K,
+          HLL_MAX_LOG_K,
+          clamped);
+      return clamped;
+    }
+    return lgK;
+  }
+
+  /**
+   * Add a key to the HLL sketch. Called on the ingestion hot path.
+   * Thread-safe: processKafkaDataMessage is single-threaded per partition.
+   */
+  public void trackKeyIngested(byte[] keyBytes) {
+    if (uniqueIngestedKeyCountHll != null) {
+      uniqueIngestedKeyCountHll.update(keyBytes);
+    }
+  }
+
+  /**
+   * Get the estimated count of unique keys ever put or deleted in this partition.
+   * Returns 0 if HLL tracking is not enabled.
+   *
+   * <p>Thread safety: HllSketch is not thread-safe. update() runs on the consumption thread
+   * while this method may be called from the OTel/Tehuti scraper thread. In steady state (HLL mode),
+   * a torn read only affects one register and produces a slightly wrong estimate.
+   */
+  public long getEstimatedUniqueIngestedKeyCount() {
+    return uniqueIngestedKeyCountHll != null ? (long) uniqueIngestedKeyCountHll.getEstimate() : 0;
+  }
+
+  /**
+   * Serialize the HLL sketch to a compact byte array for persistence.
+   * Returns null if HLL tracking is not enabled.
+   */
+  public byte[] serializeUniqueIngestedKeyCountHll() {
+    return uniqueIngestedKeyCountHll != null ? uniqueIngestedKeyCountHll.toCompactByteArray() : null;
+  }
+
+  /**
+   * Returns true if the HLL sketch has been initialized for this partition.
+   */
+  public boolean hasUniqueIngestedKeyCountHll() {
+    return uniqueIngestedKeyCountHll != null;
   }
 
   public int getPartition() {
@@ -443,6 +645,10 @@ public class PartitionConsumptionState {
 
   public OffsetRecord getOffsetRecord() {
     return this.offsetRecord;
+  }
+
+  public long getLatestMessageTimeInMs() {
+    return this.offsetRecord.calculateLatestMessageTimeInMs();
   }
 
   public void setDeferredWrite(boolean deferredWrite) {
@@ -566,12 +772,24 @@ public class PartitionConsumptionState {
         .append(isStarted())
         .append(", lagCaughtUp=")
         .append(lagCaughtUp)
+        .append(", lagCaughtUpTimeInMs=")
+        .append(lagCaughtUpTimeInMs)
         .append(", isDeferredWrite=")
         .append(deferredWrite)
         .append(", processedRecordSizeSinceLastSync=")
         .append(processedRecordSizeSinceLastSync)
         .append(", leaderFollowerState=")
         .append(leaderFollowerState)
+        .append(", leaderCompleteState=")
+        .append(leaderCompleteState)
+        .append(", lastLeaderCompleteStateUpdateInMs=")
+        .append(lastLeaderCompleteStateUpdateInMs)
+        .append(", consumeRemotely=")
+        .append(consumeRemotely)
+        .append(", latestMessageConsumedTimestampInMs=")
+        .append(latestMessageConsumedTimestampInMs)
+        .append(", blobTransferPending=")
+        .append(pendingBlobTransfer != null)
         .append("}")
         .toString();
   }
@@ -586,6 +804,21 @@ public class PartitionConsumptionState {
 
   public void resetProcessedRecordSizeSinceLastSync() {
     this.processedRecordSizeSinceLastSync = 0;
+  }
+
+  public long getConsumedBytesSinceLastGlobalRtDivSync(String key) {
+    return consumedBytesSinceLastGlobalRtDivSync.getOrDefault(key, 0L);
+  }
+
+  public void addConsumedBytesSinceLastGlobalRtDivSync(String key, long bytes) {
+    if (bytes <= 0) {
+      return;
+    }
+    consumedBytesSinceLastGlobalRtDivSync.merge(key, bytes, Long::sum);
+  }
+
+  public void resetConsumedBytesSinceLastGlobalRtDivSync(String key) {
+    consumedBytesSinceLastGlobalRtDivSync.put(key, 0L);
   }
 
   public void setLeaderFollowerState(LeaderFollowerStateType state) {
@@ -806,6 +1039,14 @@ public class PartitionConsumptionState {
 
   public boolean getReadyToServeInOffsetRecord() {
     return TRUE.equals(offsetRecord.getPreviousStatusesEntry(PREVIOUSLY_READY_TO_SERVE));
+  }
+
+  /**
+   * Clears the previouslyReadyToServe flag from the offset record. This should be called after blob transfer
+   * completes to prevent the fast RTS check from triggering based on state inherited from a different host.
+   */
+  public void clearPreviouslyReadyToServeInOffsetRecord() {
+    offsetRecord.clearPreviousStatusesEntry(PREVIOUSLY_READY_TO_SERVE);
   }
 
   /**

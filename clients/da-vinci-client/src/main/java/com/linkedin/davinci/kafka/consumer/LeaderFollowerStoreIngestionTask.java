@@ -660,15 +660,8 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
             // Re-read offset from storage since onRecovery may have modified it
             // (e.g., cleared offset when alwaysBootstrapFromVersionTopic=true).
             PubSubTopicPartition topicPartition = partitionConsumptionState.getReplicaTopicPartition();
-            PartitionConsumptionState freshPcs =
-                reinitializePartitionConsumptionStateFromStorage(topicPartition, partition);
-            validateAndSubscribePartition(
-                consumerAction,
-                topicPartition,
-                partition,
-                topicPartition.getPubSubTopic().getName(),
-                freshPcs,
-                freshPcs.getOffsetRecord());
+            PartitionConsumptionState freshPcs = reinitializePartitionConsumptionStateFromStorage(topicPartition);
+            validateAndSubscribePartition(consumerAction, freshPcs);
           }
         }
         // Skip other checks while record transformer recovery is pending — Kafka subscribe hasn't happened yet.
@@ -2044,7 +2037,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
 
   protected void produceToLocalKafka(
       DefaultPubSubMessage consumerRecord,
-      PartitionConsumptionState partitionConsumptionState,
+      PartitionConsumptionState pcs,
       LeaderProducedRecordContext leaderProducedRecordContext,
       BiConsumer<ChunkAwareCallback, LeaderMetadataWrapper> produceFunction,
       int partition,
@@ -2053,15 +2046,20 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
       long beforeProcessingRecordTimestampNs) {
     LeaderProducerCallback callback = createProducerCallback(
         consumerRecord,
-        partitionConsumptionState,
+        pcs,
         leaderProducedRecordContext,
         partition,
         kafkaUrl,
         beforeProcessingRecordTimestampNs);
+
     PubSubPosition consumedPosition = consumerRecord.getPosition();
     LeaderMetadataWrapper leaderMetadataWrapper =
         new LeaderMetadataWrapper(consumedPosition, kafkaClusterId, DEFAULT_TERM_ID);
-    partitionConsumptionState.setLastLeaderPersistFuture(leaderProducedRecordContext.getPersistedToDBFuture());
+    CompletableFuture<Void> persistedToDBFuture = leaderProducedRecordContext.getPersistedToDBFuture();
+    pcs.setLastLeaderPersistFuture(persistedToDBFuture);
+
+    addVtDivToProducerCallbackIfNeeded(consumerRecord, callback, pcs, persistedToDBFuture);
+
     long beforeProduceTimestampNS = System.nanoTime();
     produceFunction.accept(callback, leaderMetadataWrapper);
     double enqueueLatency = LatencyUtils.getElapsedTimeFromNSToMS(beforeProduceTimestampNS);
@@ -2069,19 +2067,76 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
     getVersionIngestionStats().recordProducerEnqueueTime(storeName, versionNumber, enqueueLatency);
 
     try {
-      if (shouldSendGlobalRtDiv(consumerRecord, partitionConsumptionState, kafkaUrl)) {
+      if (shouldSendGlobalRtDiv(consumerRecord, pcs, kafkaUrl)) {
         sendGlobalRtDivMessage(
             consumerRecord,
-            partitionConsumptionState,
+            pcs,
             partition,
             kafkaUrl,
             beforeProcessingRecordTimestampNs,
-            leaderMetadataWrapper,
-            leaderProducedRecordContext);
+            kafkaClusterId);
       }
     } catch (Exception e) {
-      LOGGER.error("Failed to send Global RT DIV message", e); // don't fail ingestion if sending Global RT DIV fails
+      LOGGER.error("event=globalRtDiv Failed to send Global RT DIV message", e);
     }
+  }
+
+  /**
+   * Mirrors {@link #sendGlobalRtDivMessage}'s LCVP-sync callback for leaders consuming from a remote VT source in NR
+   * VT consumption has no RT DIV state to propagate, so {@link #sendGlobalRtDivMessage} — the normal path that hands
+   * the VT DIV to the drainer — is never invoked. Without this callback, the OffsetRecord's latestConsumedVtPosition
+   * stays at EARLIEST and ingestion rewinds to the start of VT on the next leader restart.
+   *
+   * Why {@code !isRealTime()} is the right gate, even though PubSubTopic cannot distinguish local VT
+   * from remote VT (the topic name is identical across regions):
+   *   - {@link #produceToLocalKafka} is only called on the leader ({@link #shouldProduceToVersionTopic}
+   *     is true), and a leader does not consume its own local VT.
+   *   - Leader consuming RT (local or remote): {@code isRealTime()} is true → early return; LCVP sync
+   *     is handled by {@code sendGlobalRtDivMessage}.
+   *   - Leader consuming remote VT (NR): {@code isRealTime()} is false → installs the on-completion
+   *     VT DIV sync.
+   *
+   * No-op unless Global RT DIV is enabled, the consumed source is non-RT, and the byte threshold for a
+   * Global RT DIV sync has been reached. The same predicate gates {@code sendGlobalRtDivMessage}, keyed
+   * on the local VT name — VT-source bytes share the VT-name counter, tracked separately from RT bytes.
+   */
+  void addVtDivToProducerCallbackIfNeeded(
+      DefaultPubSubMessage consumerRecord,
+      LeaderProducerCallback callback,
+      PartitionConsumptionState pcs,
+      CompletableFuture<Void> persistedToDBFuture) {
+    if (!isGlobalRtDivEnabled() || consumerRecord.getTopicPartition().getPubSubTopic().isRealTime()
+        || !shouldSendGlobalRtDiv(consumerRecord, pcs, getVersionTopic().getName())) {
+      return;
+    }
+    PubSubTopicPartition topicPartition = pcs.getReplicaTopicPartition();
+    PartitionTracker vtDiv =
+        getConsumerDiv().cloneVtProducerStates(pcs.getPartition(), true, pcs.getLatestMessageTimeInMs());
+    sendVtDivSnapshotOnCompletion(callback, topicPartition, vtDiv, persistedToDBFuture);
+    pcs.resetConsumedBytesSinceLastGlobalRtDivSync(getVersionTopic().getName());
+  }
+
+  /**
+   * Installs an onCompletion callback on {@code callback} that, when the produce to local VT completes,
+   * updates {@code vtDiv}'s LCVP to the produced position and queues a drainer-side OffsetRecord sync.
+   * Restores the thread interrupt flag if the drainer rejects with {@link InterruptedException}.
+   * Shared by {@link #createGlobalRtDivCallback} (leader-RT-source) and
+   * {@link #addVtDivToProducerCallbackIfNeeded} (leader-VT-source).
+   */
+  private void sendVtDivSnapshotOnCompletion(
+      LeaderProducerCallback callback,
+      PubSubTopicPartition topicPartition,
+      PartitionTracker vtDiv,
+      CompletableFuture<Void> persistedToDBFuture) {
+    callback.setOnCompletionCallback(produceResult -> {
+      try {
+        vtDiv.updateLatestConsumedVtPosition(produceResult.getPubSubPosition());
+        storeBufferService.execSyncOffsetFromSnapshotAsync(topicPartition, vtDiv, persistedToDBFuture, this);
+      } catch (InterruptedException e) {
+        LOGGER.error("event=globalRtDiv Failed to async VT DIV OffsetRecord sync for replica: {}", topicPartition, e);
+        Thread.currentThread().interrupt();
+      }
+    });
   }
 
   @Override
@@ -2739,9 +2794,13 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
         /**
          * TODO: An improvement can be made to fail all future versions for fatal DIV exceptions after EOP.
          */
+        // shouldProduceToVersionTopic() means this leader is consuming from a non-local-VT source
+        // (e.g. RT, remote VT in NR mode, or stream-reprocessing topic) and producing to local VT.
+        // For RT, use REALTIME_TOPIC_TYPE so segments are tracked per broker URL in rtSegments.
+        // For all other cases keep VERSION_TOPIC so segments are tracked in vtSegments and synced to OffsetRecord.
         TopicType topicType = PartitionTracker.VERSION_TOPIC;
-        // shouldProduceToVersionTopic() ensures this is a LEADER that is consuming from RT or remote VT
-        if (isGlobalRtDivEnabled() && shouldProduceToVersionTopic(pcs)) {
+        if (isGlobalRtDivEnabled() && shouldProduceToVersionTopic(pcs)
+            && topicPartition.getPubSubTopic().isRealTime()) {
           topicType = TopicType.of(REALTIME_TOPIC_TYPE, kafkaUrl);
         }
         validateMessage(topicType, consumerDiv, record, pcs, false);
@@ -3148,9 +3207,9 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
     }
   }
 
-  void syncOffsetFromSnapshotIfNeeded(DefaultPubSubMessage record, PubSubTopicPartition topicPartition) {
+  void sendVtDivSnapshotIfNeeded(DefaultPubSubMessage record, PubSubTopicPartition topicPartition) {
     int partition = topicPartition.getPartitionNumber();
-    if (!isGlobalRtDivEnabled() || !shouldSyncOffsetFromSnapshot(record, getPartitionConsumptionState(partition))) {
+    if (!isGlobalRtDivEnabled() || !shouldSendVtDivSnapshot(record, getPartitionConsumptionState(partition))) {
       return; // without Global RT DIV enabled, the offset record is synced in the drainer in syncOffset()
     }
 
@@ -3158,55 +3217,63 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
     if (pcs == null || pcs.getLastQueuedRecordPersistedFuture() == null) {
       LOGGER.warn(
           "event=globalRtDiv No PCS or lastRecordPersistedFuture found for topic-partition: {}. "
-              + "Will not sync OffsetRecord without waiting for any record to be persisted",
+              + "Will not send VT DIV snapshot without waiting for any record to be persisted",
           topicPartition);
       return;
     }
 
     try {
       // VT DIV contains the latest consumed VT position (LCVP)
-      PartitionTracker vtDiv = consumerDiv.cloneVtProducerStates(partition, true);
+      long latestMessageTimeInMs = pcs.getLatestMessageTimeInMs();
+      PartitionTracker vtDiv = getConsumerDiv().cloneVtProducerStates(partition, true, latestMessageTimeInMs);
+
+      // Skip send if no real VT progress has been made yet. Syncing with EARLIEST would persist
+      // EARLIEST to the OffsetRecord, causing the consumer to re-subscribe from EARLIEST on retry.
+      if (PubSubSymbolicPosition.EARLIEST.equals(vtDiv.getLatestConsumedVtPosition())) {
+        return;
+      }
+
       CompletableFuture<Void> lastFuture = pcs.getLastQueuedRecordPersistedFuture();
       storeBufferService.execSyncOffsetFromSnapshotAsync(topicPartition, vtDiv, lastFuture, this);
-      // Reset consumer-side VT bytes so the size-based condition in shouldSyncOffsetFromSnapshot does not keep
-      // firing for every subsequent record.
-      getConsumedBytesSinceLastSync().put(getVersionTopic().getName(), 0L);
+      // Reset consumer-side VT bytes so shouldSendVtDivSnapshot does not keep firing for every subsequent record
+      pcs.resetConsumedBytesSinceLastGlobalRtDivSync(getVersionTopic().getName());
 
       // TODO: remove. this is a temporary log for debugging while the feature is in its infancy
       LOGGER.info(
-          "event=globalRtDiv Syncing LCVP for OffsetRecord topic-partition: {} position: {} size: {}",
+          "event=globalRtDiv Sending LCVP for OffsetRecord topic-partition: {} position: {} size: {}",
           topicPartition,
           record.getPosition(),
           vtDiv.getPartitionStates(PartitionTracker.VERSION_TOPIC).size());
     } catch (InterruptedException e) {
-      LOGGER.error("event=globalRtDiv Unable to sync Offset Record to update the latest consumed vt position", e);
+      LOGGER.error("event=globalRtDiv Unable to send OffsetRecord to update the latest consumed vt position", e);
+      Thread.currentThread().interrupt();
     }
   }
 
   /**
-   * Followers should sync the VT DIV to the OffsetRecord if the consumer sees a non-segment control message or a
+   * Followers should send the VT DIV to the OffsetRecord if the consumer sees a non-segment control message or a
    * Global RT DIV message.
-   * Each Global RT DIV sync will create one singular Put or multiple Puts (chunks + one manifest + Deletes). Thus
-   * if we want to sync only once, checking if it's a singular Put or the manifest Put should only trigger once.
+   * Each Global RT DIV replication will create one singular Put or multiple Puts (chunks + one manifest + Deletes).
+   * Thus, if we want to send only once, checking if it's a singular Put or the manifest Put should only trigger once.
    */
-  boolean shouldSyncOffsetFromSnapshot(DefaultPubSubMessage consumerRecord, PartitionConsumptionState pcs) {
+  boolean shouldSendVtDivSnapshot(DefaultPubSubMessage consumerRecord, PartitionConsumptionState pcs) {
     if (consumerRecord.getKey().isGlobalRtDiv()) {
       Object payloadUnion = consumerRecord.getValue().getPayloadUnion();
       if (payloadUnion instanceof Put && ((Put) payloadUnion).getSchemaId() != CHUNK_SCHEMA_ID) {
-        return true; // Global RT DIV message can be multiple chunks + deletes, only sync on one Put (manifest or value)
+        return true; // Global RT DIV message can be multiple chunks + deletes, only send on one Put (manifest or value)
       }
     } else if (isNonSegmentControlMessage(consumerRecord, null)) {
-      return true; // sync when processing most control messages
+      return true; // send when processing most control messages
     }
 
     if (pcs == null) {
-      LOGGER.warn("event=globalRtDiv No PCS found for: {} Will not sync VT DIV", consumerRecord.getTopicPartition());
+      LOGGER.warn("event=globalRtDiv No PCS found for: {} Will not send VT DIV", consumerRecord.getTopicPartition());
       return false;
     }
 
     // must be greater than the interval in shouldSendGlobalRtDiv() to not interfere
-    final long syncBytesInterval = getSyncBytesInterval(pcs); // size-based sync condition
-    long vtConsumedBytesSinceLastSync = getConsumedBytesSinceLastSync().getOrDefault(getVersionTopic().getName(), 0L);
+    final long syncBytesInterval = getSyncBytesInterval(pcs); // size-based send condition
+    long vtConsumedBytesSinceLastSync = pcs.getConsumedBytesSinceLastGlobalRtDivSync(getVersionTopic().getName());
     return syncBytesInterval > 0 && (vtConsumedBytesSinceLastSync >= 2 * syncBytesInterval);
   }
 
@@ -3904,7 +3971,8 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
    * Upon completion, the {@link LeaderProducerCallback} will write the {@link GlobalRtDivState} to the StorageEngine.
    * When the drainer receives a Global RT DIV, that is the signal to sync the VT DIV to the OffsetRecord.
    * NOTE: This method is called per-broker. The broker url is included in the key.
-   * @param previousMessage the last message validated and produced to kafka before this GlobalRtDiv will be produced
+   * @param previousMessage the last RT message that was validated and produced to kafka before this GlobalRtDiv
+   *                        will be produced.
    */
   void sendGlobalRtDivMessage(
       DefaultPubSubMessage previousMessage,
@@ -3912,16 +3980,18 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
       int partition,
       String brokerUrl,
       long beforeProcessingRecordTimestampNs,
-      LeaderMetadataWrapper leaderMetadataWrapper,
-      LeaderProducedRecordContext context) {
+      int kafkaClusterId) {
     final byte[] keyBytes = getGlobalRtDivKeyBytes(partition, brokerUrl);
     final PubSubTopicPartition topicPartition = previousMessage.getTopicPartition();
     TopicType realTimeTopicType = TopicType.of(REALTIME_TOPIC_TYPE, brokerUrl);
+    LeaderMetadataWrapper leaderMetadataWrapper =
+        new LeaderMetadataWrapper(previousMessage.getPosition(), kafkaClusterId, DEFAULT_TERM_ID);
 
     // Snapshot the RT DIV (single broker URL) in preparation to be produced
     // VT DIV contains the latest consumed VT position (LCVP)
-    PartitionTracker vtDiv = consumerDiv.cloneVtProducerStates(partition, true);
-    PartitionTracker rtDiv = consumerDiv.cloneRtProducerStates(partition, brokerUrl);
+    long latestMessageTimeInMs = pcs.getLatestMessageTimeInMs();
+    PartitionTracker vtDiv = consumerDiv.cloneVtProducerStates(partition, true, latestMessageTimeInMs);
+    PartitionTracker rtDiv = consumerDiv.cloneRtProducerStates(partition, brokerUrl, latestMessageTimeInMs);
     Map<CharSequence, ProducerPartitionState> rtDivPartitionStates = rtDiv.getPartitionStates(realTimeTopicType);
 
     // Create GlobalRtDivState (RT DIV + LCRP) and serialize into a byte array. Try compression.
@@ -3934,7 +4004,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
         partition,
         brokerUrl,
         beforeProcessingRecordTimestampNs,
-        context,
+        kafkaClusterId,
         keyBytes,
         valueBytes,
         topicPartition,
@@ -3978,7 +4048,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
             null,
             true);
 
-    consumedBytesSinceLastSync.put(brokerUrl, 0L); // reset the timer for the next sync, since RT DIV was just synced
+    pcs.resetConsumedBytesSinceLastGlobalRtDivSync(brokerUrl);
   }
 
   private byte[] createGlobalRtDivValueBytes(
@@ -4007,7 +4077,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
       int partition,
       String brokerUrl,
       long beforeProcessingRecordTimestampNs,
-      LeaderProducedRecordContext prevContext,
+      int kafkaClusterId,
       byte[] keyBytes,
       byte[] valueBytes,
       PubSubTopicPartition topicPartition,
@@ -4034,22 +4104,13 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
         prevMessage.getPosition(),
         System.currentTimeMillis(),
         divKey.getKeyLength() + valueBytes.length);
-    LeaderProducedRecordContext context = LeaderProducedRecordContext
-        .newPutRecord(prevContext.getConsumedKafkaClusterId(), prevContext.getConsumedPosition(), keyBytes, put);
+    LeaderProducedRecordContext context =
+        LeaderProducedRecordContext.newPutRecord(kafkaClusterId, prevMessage.getPosition(), keyBytes, put);
     LeaderProducerCallback divCallback =
         createProducerCallback(divMessage, pcs, context, partition, brokerUrl, beforeProcessingRecordTimestampNs);
 
-    // After producing the RT DIV to local VT and LeaderProducerCallback.onCompletion() enqueuing RT DIV in the drainer,
-    // the VT DIV should be sent to the drainer to persist the LCVP onto disk by syncing the OffsetRecord
-    divCallback.setOnCompletionCallback(produceResult -> {
-      try {
-        CompletableFuture<Void> lastRecordPersistedFuture = context.getPersistedToDBFuture();
-        vtDiv.updateLatestConsumedVtPosition(produceResult.getPubSubPosition()); // LCVP = produced position in local VT
-        storeBufferService.execSyncOffsetFromSnapshotAsync(topicPartition, vtDiv, lastRecordPersistedFuture, this);
-      } catch (InterruptedException e) {
-        LOGGER.error("event=globalRtDiv Failed to sync VT DIV to OffsetRecord for replica: {}", topicPartition, e);
-      }
-    });
+    // After producing the RT DIV to local VT, the drainer should sync the VT DIV + LCVP within the OffsetRecord
+    sendVtDivSnapshotOnCompletion(divCallback, topicPartition, vtDiv, context.getPersistedToDBFuture());
 
     return divCallback;
   }
@@ -4097,9 +4158,12 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
           RawBytesStoreDeserializerCache.getInstance(),
           compressor.get(),
           manifestContainer);
-    } catch (VeniceException e) {
-      LOGGER.error(
-          "Unable to read Global RT DIV state from metadata storage for topic-partition: {}, brokerUrl: {}",
+    } catch (Exception e) {
+      // GlobalRtDivState loading is best-effort. Any failure (e.g. storage not initialized,
+      // compressor dictionary not yet available before SOP is consumed on secondary-fabric leaders)
+      // should not propagate and kill ingestion.
+      LOGGER.warn(
+          "Unable to read Global RT DIV state for topic-partition: {}, brokerUrl: {}",
           topicPartition,
           brokerUrl,
           e);

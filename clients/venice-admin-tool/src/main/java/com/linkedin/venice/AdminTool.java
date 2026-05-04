@@ -84,6 +84,7 @@ import com.linkedin.venice.helix.ZkClientFactory;
 import com.linkedin.venice.meta.BackupStrategy;
 import com.linkedin.venice.meta.BufferReplayPolicy;
 import com.linkedin.venice.meta.DataReplicationPolicy;
+import com.linkedin.venice.meta.IngestionPauseMode;
 import com.linkedin.venice.meta.LifecycleHooksRecord;
 import com.linkedin.venice.meta.QueryAction;
 import com.linkedin.venice.meta.ServerAdminAction;
@@ -559,6 +560,9 @@ public class AdminTool {
           break;
         case UPDATE_KAFKA_TOPIC_MIN_IN_SYNC_REPLICA:
           updateKafkaTopicMinInSyncReplica(cmd);
+          break;
+        case UPDATE_KAFKA_TOPIC_UNCLEAN_LEADER_ELECTION:
+          updateKafkaTopicUncleanLeaderElection(cmd);
           break;
         case START_FABRIC_BUILDOUT:
           startFabricBuildout(cmd);
@@ -1365,6 +1369,18 @@ public class AdminTool {
         p -> params.setBootstrapToOnlineTimeoutInHours(p),
         argSet);
     genericParam(cmd, Arg.BACKUP_STRATEGY, s -> BackupStrategy.valueOf(s), p -> params.setBackupStrategy(p), argSet);
+    genericParam(
+        cmd,
+        Arg.INGESTION_PAUSE_MODE,
+        s -> IngestionPauseMode.valueOf(s),
+        p -> params.setIngestionPauseMode(p),
+        argSet);
+    genericParam(
+        cmd,
+        Arg.INGESTION_PAUSED_REGIONS,
+        s -> UpdateStoreQueryParams.normalizeRegions(Arrays.asList(s.split(","))),
+        p -> params.setIngestionPausedRegions(p),
+        argSet);
     booleanParam(cmd, Arg.AUTO_SCHEMA_REGISTER_FOR_PUSHJOB_ENABLED, p -> params.setAutoSchemaPushJobEnabled(p), argSet);
     booleanParam(cmd, Arg.HYBRID_STORE_DISK_QUOTA_ENABLED, p -> params.setHybridStoreDiskQuotaEnabled(p), argSet);
     booleanParam(cmd, Arg.REGULAR_VERSION_ETL_ENABLED, p -> params.setRegularVersionETLEnabled(p), argSet);
@@ -3072,6 +3088,15 @@ public class AdminTool {
       String kafkaTopicName = getRequiredArgument(cmd, Arg.KAFKA_TOPIC_NAME);
       int kafkaTopicMinISR = Integer.parseInt(getRequiredArgument(cmd, Arg.KAFKA_TOPIC_MIN_IN_SYNC_REPLICA));
       return client.updateKafkaTopicMinInSyncReplica(kafkaTopicName, kafkaTopicMinISR);
+    });
+  }
+
+  private static void updateKafkaTopicUncleanLeaderElection(CommandLine cmd) {
+    updateKafkaTopicConfig(cmd, client -> {
+      String kafkaTopicName = getRequiredArgument(cmd, Arg.KAFKA_TOPIC_NAME);
+      boolean uncleanLeaderElectionEnabled =
+          Boolean.parseBoolean(getRequiredArgument(cmd, Arg.KAFKA_TOPIC_UNCLEAN_LEADER_ELECTION_ENABLED));
+      return client.updateKafkaTopicUncleanLeaderElection(kafkaTopicName, uncleanLeaderElectionEnabled);
     });
   }
 

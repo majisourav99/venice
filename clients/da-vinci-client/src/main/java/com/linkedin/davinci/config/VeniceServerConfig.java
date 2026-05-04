@@ -69,12 +69,15 @@ import static com.linkedin.venice.ConfigKeys.ROUTER_PRINCIPAL_NAME;
 import static com.linkedin.venice.ConfigKeys.SERVER_AA_WC_INGESTION_STORAGE_LOOKUP_THREAD_POOL_SIZE;
 import static com.linkedin.venice.ConfigKeys.SERVER_AA_WC_WORKLOAD_PARALLEL_PROCESSING_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_AA_WC_WORKLOAD_PARALLEL_PROCESSING_THREAD_POOL_SIZE;
+import static com.linkedin.venice.ConfigKeys.SERVER_ACTIVE_KEY_COUNT_FOR_ALL_BATCH_PUSH_ENABLED;
+import static com.linkedin.venice.ConfigKeys.SERVER_ACTIVE_KEY_COUNT_FOR_HYBRID_STORE_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_ADAPTIVE_THROTTLER_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_ADAPTIVE_THROTTLER_MULTI_GET_LATENCY_THRESHOLD;
 import static com.linkedin.venice.ConfigKeys.SERVER_ADAPTIVE_THROTTLER_READ_COMPUTE_GET_LATENCY_THRESHOLD;
 import static com.linkedin.venice.ConfigKeys.SERVER_ADAPTIVE_THROTTLER_SIGNAL_IDLE_THRESHOLD;
 import static com.linkedin.venice.ConfigKeys.SERVER_ADAPTIVE_THROTTLER_SIGNAL_REFRESH_INTERVAL_IN_SECONDS;
 import static com.linkedin.venice.ConfigKeys.SERVER_ADAPTIVE_THROTTLER_SINGLE_GET_LATENCY_THRESHOLD;
+import static com.linkedin.venice.ConfigKeys.SERVER_ADD_RMD_TO_BATCH_PUSH_FOR_HYBRID_STORES;
 import static com.linkedin.venice.ConfigKeys.SERVER_BATCH_REPORT_END_OF_INCREMENTAL_PUSH_STATUS_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_BLOB_TRANSFER_ADAPTIVE_THROTTLER_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_BLOB_TRANSFER_ADAPTIVE_THROTTLER_UPDATE_PERCENTAGE;
@@ -208,6 +211,7 @@ import static com.linkedin.venice.ConfigKeys.SERVER_SSL_HANDSHAKE_QUEUE_CAPACITY
 import static com.linkedin.venice.ConfigKeys.SERVER_SSL_HANDSHAKE_THREAD_POOL_SIZE;
 import static com.linkedin.venice.ConfigKeys.SERVER_STOP_CONSUMPTION_TIMEOUT_IN_SECONDS;
 import static com.linkedin.venice.ConfigKeys.SERVER_STORE_TO_EARLY_TERMINATION_THRESHOLD_MS_MAP;
+import static com.linkedin.venice.ConfigKeys.SERVER_STORE_VERSION_METADATA_WAIT_DURING_STATE_TRANSITION_TIME_MS;
 import static com.linkedin.venice.ConfigKeys.SERVER_STUCK_CONSUMER_REPAIR_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_STUCK_CONSUMER_REPAIR_INTERVAL_SECOND;
 import static com.linkedin.venice.ConfigKeys.SERVER_STUCK_CONSUMER_REPAIR_THRESHOLD_SECOND;
@@ -217,11 +221,14 @@ import static com.linkedin.venice.ConfigKeys.SERVER_THROTTLER_FACTORS_FOR_CURREN
 import static com.linkedin.venice.ConfigKeys.SERVER_THROTTLER_FACTORS_FOR_CURRENT_VERSION_SEPARATE_RT_LEADER;
 import static com.linkedin.venice.ConfigKeys.SERVER_THROTTLER_FACTORS_FOR_NON_CURRENT_VERSION_AA_WC_LEADER;
 import static com.linkedin.venice.ConfigKeys.SERVER_THROTTLER_FACTORS_FOR_NON_CURRENT_VERSION_NON_AA_WC_LEADER;
+import static com.linkedin.venice.ConfigKeys.SERVER_UNIQUE_INGESTED_KEY_COUNT_HLL_ENABLED;
+import static com.linkedin.venice.ConfigKeys.SERVER_UNIQUE_INGESTED_KEY_COUNT_HLL_LOG2K;
 import static com.linkedin.venice.ConfigKeys.SERVER_UNSUB_AFTER_BATCHPUSH;
 import static com.linkedin.venice.ConfigKeys.SERVER_USE_CHECKPOINTED_PUBSUB_POSITIONS;
 import static com.linkedin.venice.ConfigKeys.SERVER_USE_HEARTBEAT_LAG_FOR_READY_TO_SERVE_CHECK_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SERVER_USE_METRICS_BASED_POSITION_IN_LAG_COMPUTATION;
 import static com.linkedin.venice.ConfigKeys.SERVER_USE_UPSTREAM_PUBSUB_POSITIONS;
+import static com.linkedin.venice.ConfigKeys.SERVER_VERSION_SWAP_DISK_SIZE_DROP_ALERT_THRESHOLD;
 import static com.linkedin.venice.ConfigKeys.SERVER_ZSTD_DICT_COMPRESSION_LEVEL;
 import static com.linkedin.venice.ConfigKeys.SEVER_CALCULATE_QUOTA_USAGE_BASED_ON_PARTITIONS_ASSIGNMENT_ENABLED;
 import static com.linkedin.venice.ConfigKeys.SORTED_INPUT_DRAINER_SIZE;
@@ -246,6 +253,7 @@ import com.linkedin.davinci.helix.LeaderFollowerPartitionStateModelFactory;
 import com.linkedin.davinci.ingestion.utils.IngestionTaskReusableObjects;
 import com.linkedin.davinci.kafka.consumer.KafkaConsumerService;
 import com.linkedin.davinci.kafka.consumer.KafkaConsumerServiceDelegator;
+import com.linkedin.davinci.kafka.consumer.PartitionConsumptionState;
 import com.linkedin.davinci.kafka.consumer.RemoteIngestionRepairService;
 import com.linkedin.davinci.store.rocksdb.RocksDBServerConfig;
 import com.linkedin.davinci.validation.DataIntegrityValidator;
@@ -426,6 +434,8 @@ public class VeniceServerConfig extends VeniceClusterConfig {
 
   private final double diskFullThreshold;
 
+  private final double versionSwapDiskSizeDropAlertThreshold;
+
   private final int partitionGracefulDropDelaySeconds;
 
   private final int stopConsumptionTimeoutInSeconds;
@@ -461,6 +471,8 @@ public class VeniceServerConfig extends VeniceClusterConfig {
   private final boolean diskHealthCheckServiceEnabled;
 
   private final Duration serverMaxWaitForVersionInfo;
+
+  private final long storeVersionMetadataWaitDuringStateTransitionTimeMs;
 
   private final boolean computeFastAvroEnabled;
 
@@ -604,6 +616,8 @@ public class VeniceServerConfig extends VeniceClusterConfig {
   private final boolean recordLevelTimestampEnabled;
   private final boolean perRecordOtelMetricsEnabled;
   private final boolean perRecordBatchOtelMetricsEnabled;
+  private final boolean uniqueIngestedKeyCountHllEnabled;
+  private final int uniqueIngestedKeyCountHllLog2K;
   private final long leaderCompleteStateCheckInFollowerValidIntervalMs;
   private final boolean stuckConsumerRepairEnabled;
   private final int stuckConsumerRepairIntervalSecond;
@@ -711,6 +725,9 @@ public class VeniceServerConfig extends VeniceClusterConfig {
   private final int lagMonitorCleanupCycle;
   private final boolean readQuotaInitializationFallbackEnabled;
   private final boolean ingestionProgressLoggingEnabled;
+  private final boolean addRmdToBatchPushForHybridStores;
+  private final boolean activeKeyCountForAllBatchPushEnabled;
+  private final boolean activeKeyCountForHybridStoreEnabled;
   private final int partialUpdateLargeResultLogThresholdBytes;
   private final long partialUpdateAmplificationReportIntervalMs;
 
@@ -860,6 +877,8 @@ public class VeniceServerConfig extends VeniceClusterConfig {
     databaseSyncBytesIntervalForDeferredWriteMode =
         serverProperties.getSizeInBytes(SERVER_DATABASE_SYNC_BYTES_INTERNAL_FOR_DEFERRED_WRITE_MODE, 60 * 1024 * 1024);
     diskFullThreshold = serverProperties.getDouble(SERVER_DISK_FULL_THRESHOLD, 0.95);
+    versionSwapDiskSizeDropAlertThreshold =
+        serverProperties.getDouble(SERVER_VERSION_SWAP_DISK_SIZE_DROP_ALERT_THRESHOLD, 0.5);
     partitionGracefulDropDelaySeconds = serverProperties.getInt(SERVER_PARTITION_GRACEFUL_DROP_DELAY_IN_SECONDS, 30);
     stopConsumptionTimeoutInSeconds = serverProperties.getInt(SERVER_STOP_CONSUMPTION_TIMEOUT_IN_SECONDS, 180);
     leakedResourceCleanUpIntervalInMS =
@@ -879,6 +898,8 @@ public class VeniceServerConfig extends VeniceClusterConfig {
     diskHealthCheckServiceEnabled = serverProperties.getBoolean(SERVER_DISK_HEALTH_CHECK_SERVICE_ENABLED, true);
     serverMaxWaitForVersionInfo =
         Duration.ofMillis(serverProperties.getLong(SERVER_MAX_WAIT_FOR_VERSION_INFO_MS_CONFIG, 5000));
+    storeVersionMetadataWaitDuringStateTransitionTimeMs =
+        serverProperties.getLong(SERVER_STORE_VERSION_METADATA_WAIT_DURING_STATE_TRANSITION_TIME_MS, 300_000);
     computeFastAvroEnabled = serverProperties.getBoolean(SERVER_COMPUTE_FAST_AVRO_ENABLED, true);
     participantMessageConsumptionDelayMs = serverProperties.getLong(PARTICIPANT_MESSAGE_CONSUMPTION_DELAY_MS, 60000);
     serverPromotionToLeaderReplicaDelayMs =
@@ -1045,6 +1066,9 @@ public class VeniceServerConfig extends VeniceClusterConfig {
     recordLevelTimestampEnabled = serverProperties.getBoolean(SERVER_RECORD_LEVEL_TIMESTAMP_ENABLED, false);
     perRecordOtelMetricsEnabled = serverProperties.getBoolean(SERVER_PER_RECORD_OTEL_METRICS_ENABLED, false);
     perRecordBatchOtelMetricsEnabled = serverProperties.getBoolean(SERVER_PER_RECORD_BATCH_OTEL_METRICS_ENABLED, false);
+    uniqueIngestedKeyCountHllEnabled = serverProperties.getBoolean(SERVER_UNIQUE_INGESTED_KEY_COUNT_HLL_ENABLED, false);
+    uniqueIngestedKeyCountHllLog2K = serverProperties
+        .getInt(SERVER_UNIQUE_INGESTED_KEY_COUNT_HLL_LOG2K, PartitionConsumptionState.HLL_DEFAULT_LOG_K);
     batchReportEOIPEnabled =
         serverProperties.getBoolean(SERVER_BATCH_REPORT_END_OF_INCREMENTAL_PUSH_STATUS_ENABLED, false);
     incrementalPushStatusWriteMode =
@@ -1228,6 +1252,12 @@ public class VeniceServerConfig extends VeniceClusterConfig {
     this.readQuotaInitializationFallbackEnabled =
         serverProperties.getBoolean(SERVER_READ_QUOTA_INITIALIZATION_FALLBACK_ENABLED, true);
     this.ingestionProgressLoggingEnabled = serverProperties.getBoolean(POSITIONAL_PROGRESS_LOGGING_ENABLED, false);
+    this.addRmdToBatchPushForHybridStores =
+        serverProperties.getBoolean(SERVER_ADD_RMD_TO_BATCH_PUSH_FOR_HYBRID_STORES, false);
+    this.activeKeyCountForAllBatchPushEnabled =
+        serverProperties.getBoolean(SERVER_ACTIVE_KEY_COUNT_FOR_ALL_BATCH_PUSH_ENABLED, false);
+    this.activeKeyCountForHybridStoreEnabled =
+        serverProperties.getBoolean(SERVER_ACTIVE_KEY_COUNT_FOR_HYBRID_STORE_ENABLED, false);
     this.partialUpdateLargeResultLogThresholdBytes =
         serverProperties.getInt(PARTIAL_UPDATE_LARGE_RESULT_LOG_THRESHOLD_BYTES, 100 * 1024);
     this.partialUpdateAmplificationReportIntervalMs =
@@ -1435,6 +1465,10 @@ public class VeniceServerConfig extends VeniceClusterConfig {
     return diskFullThreshold;
   }
 
+  public double getVersionSwapDiskSizeDropAlertThreshold() {
+    return versionSwapDiskSizeDropAlertThreshold;
+  }
+
   public int getPartitionGracefulDropDelaySeconds() {
     return partitionGracefulDropDelaySeconds;
   }
@@ -1485,6 +1519,10 @@ public class VeniceServerConfig extends VeniceClusterConfig {
 
   public Duration getServerMaxWaitForVersionInfo() {
     return serverMaxWaitForVersionInfo;
+  }
+
+  public long getStoreVersionMetadataWaitDuringStateTransitionTimeMs() {
+    return storeVersionMetadataWaitDuringStateTransitionTimeMs;
   }
 
   public BlockingQueueType getBlockingQueueType() {
@@ -1841,6 +1879,14 @@ public class VeniceServerConfig extends VeniceClusterConfig {
 
   public boolean isPerRecordOtelMetricsEnabled() {
     return perRecordOtelMetricsEnabled;
+  }
+
+  public boolean isUniqueIngestedKeyCountHllEnabled() {
+    return uniqueIngestedKeyCountHllEnabled;
+  }
+
+  public int getUniqueIngestedKeyCountHllLog2K() {
+    return uniqueIngestedKeyCountHllLog2K;
   }
 
   public boolean isPerRecordBatchOtelMetricsEnabled() {
@@ -2225,6 +2271,18 @@ public class VeniceServerConfig extends VeniceClusterConfig {
 
   public boolean isIngestionProgressLoggingEnabled() {
     return ingestionProgressLoggingEnabled;
+  }
+
+  public boolean isAddRmdToBatchPushForHybridStoresEnabled() {
+    return addRmdToBatchPushForHybridStores;
+  }
+
+  public boolean isActiveKeyCountForAllBatchPushEnabled() {
+    return activeKeyCountForAllBatchPushEnabled;
+  }
+
+  public boolean isActiveKeyCountForHybridStoreEnabled() {
+    return activeKeyCountForHybridStoreEnabled;
   }
 
   public int getPartialUpdateLargeResultLogThresholdBytes() {

@@ -44,6 +44,8 @@ public class OffsetRecord {
   public static final long LOWEST_OFFSET = -1;
   public static final long LOWEST_OFFSET_LAG = 0;
   public static final long DEFAULT_OFFSET_LAG = -1;
+  /** Sentinel value for activeKeyCount: not tracked or invalidated. Matches the Avro schema default. */
+  public static final long ACTIVE_KEY_COUNT_NOT_TRACKED = -1;
   public static final String NON_AA_REPLICATION_UPSTREAM_OFFSET_MAP_KEY = ""; // A place holder key
   private static final String PARTITION_STATE_STRING = "PartitionState";
   private static final String NULL_STRING = "null";
@@ -109,7 +111,7 @@ public class OffsetRecord {
     emptyPartitionState.lastProcessedVersionTopicPubSubPosition = PubSubSymbolicPosition.EARLIEST.toWireFormatBuffer();
     emptyPartitionState.lastConsumedVersionTopicPubSubPosition = PubSubSymbolicPosition.EARLIEST.toWireFormatBuffer();
     emptyPartitionState.upstreamVersionTopicPubSubPosition = PubSubSymbolicPosition.EARLIEST.toWireFormatBuffer();
-    emptyPartitionState.lastConsumedVersionTopicPubSubPosition = PubSubSymbolicPosition.EARLIEST.toWireFormatBuffer();
+    emptyPartitionState.activeKeyCount = ACTIVE_KEY_COUNT_NOT_TRACKED;
     return emptyPartitionState;
   }
 
@@ -123,6 +125,10 @@ public class OffsetRecord {
 
   public String getPreviousStatusesEntry(CharSequence key) {
     return partitionState.getPreviousStatuses().getOrDefault(key, NULL_STRING).toString();
+  }
+
+  public void clearPreviousStatusesEntry(CharSequence key) {
+    partitionState.getPreviousStatuses().remove(key);
   }
 
   public PubSubPosition getCheckpointedLocalVtPosition() {
@@ -236,10 +242,6 @@ public class OffsetRecord {
       return null;
     }
     return map.get(GuidUtils.guidToUtf8(producerGuid));
-  }
-
-  private Map<String, Map<CharSequence, ProducerPartitionState>> getRealTimeProducerState() {
-    return partitionState.getRealtimeTopicProducerStates();
   }
 
   public synchronized ProducerPartitionState getProducerPartitionState(GUID producerGuid) {
@@ -383,6 +385,14 @@ public class OffsetRecord {
     return pubSubPositionDeserializer.toPosition(this.partitionState.getLastConsumedVersionTopicPubSubPosition());
   }
 
+  public long getActiveKeyCount() {
+    return this.partitionState.activeKeyCount;
+  }
+
+  public void setActiveKeyCount(long activeKeyCount) {
+    this.partitionState.activeKeyCount = activeKeyCount;
+  }
+
   public Map<String, IncrementalPushReplicaStatus> getTrackingIncrementalPushStatus() {
     return partitionState.trackingIncrementalPushStatus;
   }
@@ -392,15 +402,24 @@ public class OffsetRecord {
     this.partitionState.trackingIncrementalPushStatus = trackingIncrementalPushStatus;
   }
 
+  public ByteBuffer getUniqueIngestedKeyCountHllSketch() {
+    return partitionState.uniqueIngestedKeyCountHllSketch;
+  }
+
+  public void setUniqueIngestedKeyCountHllSketch(ByteBuffer bytes) {
+    partitionState.uniqueIngestedKeyCountHllSketch = bytes;
+  }
+
   @Override
   public String toString() {
     return "OffsetRecord{" + "localVtPosition=" + getCheckpointedLocalVtPosition() + ", remoteVtPosition="
         + getCheckpointedRemoteVtPosition() + ", rtPositions=" + getPartitionUpstreamPositionString() + ", leaderTopic="
         + getLeaderTopic() + ", offsetLag=" + getOffsetLag() + ", eventTimeEpochMs=" + calculateLatestMessageTimeInMs()
         + ", latestProducerProcessingTimeInMs=" + getLatestProducerProcessingTimeInMs() + ", isEndOfPushReceived="
-        + isEndOfPushReceived() + ", databaseInfo=" + getDatabaseInfo() + ", realTimeProducerState="
-        + getRealTimeProducerState() + ", recordTransformerClassHash=" + getRecordTransformerClassHash()
-        + ", lastConsumedVtPosition=" + getLatestConsumedVtPosition() + '}';
+        + isEndOfPushReceived() + ", heartbeatTimestamp=" + getHeartbeatTimestamp() + ", lastCheckpointTimestamp="
+        + getLastCheckpointTimestamp() + ", previousStatuses=" + partitionState.getPreviousStatuses()
+        + ", recordTransformerClassHash=" + getRecordTransformerClassHash() + ", lastConsumedVtPosition="
+        + getLatestConsumedVtPosition() + '}';
   }
 
   /**
