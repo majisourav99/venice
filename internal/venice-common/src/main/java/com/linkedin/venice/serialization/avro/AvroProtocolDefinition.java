@@ -44,13 +44,13 @@ public enum AvroProtocolDefinition {
   /**
    * Used for the Kafka topics, including the main data topics as well as the admin topic.
    */
-  KAFKA_MESSAGE_ENVELOPE(23, 13, KafkaMessageEnvelope.class),
+  KAFKA_MESSAGE_ENVELOPE(23, 14, KafkaMessageEnvelope.class),
 
   /**
    * Used to persist the state of a partition in Storage Nodes, including offset,
    * Data Ingest Validation state, etc.
    */
-  PARTITION_STATE(24, 22, PartitionState.class),
+  PARTITION_STATE(24, 23, PartitionState.class),
 
   /**
    * Used to persist state related to a store-version, including Start of Buffer Replay

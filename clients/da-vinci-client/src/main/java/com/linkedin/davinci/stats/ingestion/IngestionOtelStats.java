@@ -6,6 +6,8 @@ import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.BAT
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.BATCH_PROCESSING_REQUEST_ERROR_COUNT;
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.BATCH_PROCESSING_REQUEST_RECORD_COUNT;
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.BATCH_PROCESSING_REQUEST_TIME;
+import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.BATCH_PUSH_RECORD_COUNT_MATCH_COUNT;
+import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.BATCH_PUSH_RECORD_COUNT_MISMATCH_COUNT;
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.BYTES_CONSUMED_AS_UNCOMPRESSED_SIZE;
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.CHECKSUM_VERIFICATION_FAILURE_COUNT;
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.CONSUMER_ACTION_TIME;
@@ -42,6 +44,7 @@ import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.PRO
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.PRODUCER_SYNCHRONIZE_TIME;
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.RECORD_ASSEMBLED_SIZE;
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.RECORD_ASSEMBLED_SIZE_RATIO;
+import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.RECORD_COUNT_MISMATCH_FAILURE_COUNT;
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.RECORD_KEY_SIZE;
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.RECORD_VALUE_SIZE;
 import static com.linkedin.davinci.stats.ingestion.IngestionOtelMetricEntity.RESUBSCRIPTION_FAILURE_COUNT;
@@ -102,7 +105,7 @@ public class IngestionOtelStats {
   private final VeniceOpenTelemetryMetricsRepository otelRepository;
   private final Map<VeniceMetricsDimensions, String> baseDimensionsMap;
 
-  private volatile VersionInfo versionInfo = new VersionInfo(NON_EXISTING_VERSION, NON_EXISTING_VERSION);
+  private volatile VersionInfo versionInfo = VersionInfo.NON_EXISTING;
 
   // Store ingestion tasks by version for ASYNC_GAUGE callbacks
   private final Map<Integer, StoreIngestionTask> ingestionTasksByVersion;
@@ -183,6 +186,9 @@ public class IngestionOtelStats {
   private final MetricEntityStateOneEnum<VersionRole> checksumVerificationFailureCountMetric;
   private final MetricEntityStateOneEnum<VersionRole> partialUpdateAmplificationAlertCountMetric;
   private final MetricEntityStateOneEnum<VersionRole> activeKeyCountInvalidationMetric;
+  private final MetricEntityStateOneEnum<VersionRole> batchPushRecordCountMatchMetric;
+  private final MetricEntityStateOneEnum<VersionRole> batchPushRecordCountMismatchMetric;
+  private final MetricEntityStateOneEnum<VersionRole> recordCountMismatchFailureMetric;
 
   // Counter metrics with 2nd enum dimension
   private final MetricEntityStateTwoEnums<VersionRole, VeniceIngestionFailureReason> ingestionFailureCountMetric;
@@ -257,6 +263,9 @@ public class IngestionOtelStats {
     this.checksumVerificationFailureCountMetric = null;
     this.partialUpdateAmplificationAlertCountMetric = null;
     this.activeKeyCountInvalidationMetric = null;
+    this.batchPushRecordCountMatchMetric = null;
+    this.batchPushRecordCountMismatchMetric = null;
+    this.recordCountMismatchFailureMetric = null;
     this.ingestionFailureCountMetric = null;
     this.dcrLookupCacheHitCountMetric = null;
     this.bytesConsumedAsUncompressedSizeMetric = null;
@@ -275,7 +284,8 @@ public class IngestionOtelStats {
       String clusterName,
       String localRegionName,
       boolean ingestionOtelStatsEnabled,
-      boolean uniqueIngestedKeyCountHllEnabled) {
+      boolean uniqueIngestedKeyCountHllEnabled,
+      boolean activeKeyCountEnabled) {
     OpenTelemetryMetricsSetup.OpenTelemetryMetricsSetupInfo otelSetup =
         OpenTelemetryMetricsSetup.builder(metricsRepository)
             .setOtelEnabledOverride(ingestionOtelStatsEnabled)
@@ -383,7 +393,11 @@ public class IngestionOtelStats {
     checksumVerificationFailureCountMetric = createOneEnumMetric(CHECKSUM_VERIFICATION_FAILURE_COUNT.getMetricEntity());
     partialUpdateAmplificationAlertCountMetric =
         createOneEnumMetric(PARTIAL_UPDATE_AMPLIFICATION_ALERT_COUNT.getMetricEntity());
-    activeKeyCountInvalidationMetric = createOneEnumMetric(ACTIVE_KEY_COUNT_INVALIDATION.getMetricEntity());
+    activeKeyCountInvalidationMetric =
+        activeKeyCountEnabled ? createOneEnumMetric(ACTIVE_KEY_COUNT_INVALIDATION.getMetricEntity()) : null;
+    batchPushRecordCountMatchMetric = createOneEnumMetric(BATCH_PUSH_RECORD_COUNT_MATCH_COUNT.getMetricEntity());
+    batchPushRecordCountMismatchMetric = createOneEnumMetric(BATCH_PUSH_RECORD_COUNT_MISMATCH_COUNT.getMetricEntity());
+    recordCountMismatchFailureMetric = createOneEnumMetric(RECORD_COUNT_MISMATCH_FAILURE_COUNT.getMetricEntity());
 
     // Initialize HostLevelIngestionStats OTel metrics - counters with 2nd enum dimension
     ingestionFailureCountMetric =
@@ -405,10 +419,14 @@ public class IngestionOtelStats {
      * Mid-cycle leader/follower transitions can briefly double-count or skip a partition;
      * self-corrects on the next collection.
      */
-    activeKeyCountByRoleAndReplicaType = createAsyncByRoleAndReplicaType(
-        ACTIVE_KEY_COUNT.getMetricEntity(),
-        (role, replicaType) -> getTaskForRole(role),
-        (task, role, replicaType) -> task.getActiveKeyCount(replicaType));
+    if (activeKeyCountEnabled) {
+      activeKeyCountByRoleAndReplicaType = createAsyncByRoleAndReplicaType(
+          ACTIVE_KEY_COUNT.getMetricEntity(),
+          (role, replicaType) -> getTaskForRole(role),
+          (task, role, replicaType) -> task.getActiveKeyCount(replicaType));
+    } else {
+      activeKeyCountByRoleAndReplicaType = null;
+    }
 
     if (uniqueIngestedKeyCountHllEnabled) {
       uniqueIngestedKeyCountByRoleAndReplicaType = createAsyncByRoleAndReplicaType(
@@ -764,6 +782,18 @@ public class IngestionOtelStats {
     checksumVerificationFailureCountMetric.record(value, classifyVersion(version, versionInfo));
   }
 
+  public void recordBatchPushRecordCountMatch(int version, long value) {
+    batchPushRecordCountMatchMetric.record(value, classifyVersion(version, versionInfo));
+  }
+
+  public void recordBatchPushRecordCountMismatch(int version, long value) {
+    batchPushRecordCountMismatchMetric.record(value, classifyVersion(version, versionInfo));
+  }
+
+  public void recordRecordCountMismatchFailure(int version, long value) {
+    recordCountMismatchFailureMetric.record(value, classifyVersion(version, versionInfo));
+  }
+
   // Count methods with 2nd enum dimension
 
   public void recordIngestionFailureCount(int version, VeniceIngestionFailureReason reason, long value) {
@@ -801,7 +831,9 @@ public class IngestionOtelStats {
   }
 
   public void recordActiveKeyCountInvalidation(int version) {
-    activeKeyCountInvalidationMetric.record(1, classifyVersion(version, versionInfo));
+    if (activeKeyCountInvalidationMetric != null) {
+      activeKeyCountInvalidationMetric.record(1, classifyVersion(version, versionInfo));
+    }
   }
 
 }

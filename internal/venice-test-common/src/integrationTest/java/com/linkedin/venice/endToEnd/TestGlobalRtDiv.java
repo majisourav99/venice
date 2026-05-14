@@ -838,10 +838,14 @@ public class TestGlobalRtDiv {
     int MESSAGE_COUNT = 100;
     int serverCount = 2;
 
-    // Use a very small max message size so the server's VeniceWriter chunks the GlobalRtDivState.
-    // A GlobalRtDivState with 5+ producers serializes to ~1 KB, well above the 200-byte limit.
+    // Use a small max message size so the server's VeniceWriter chunks the GlobalRtDivState.
+    // A GlobalRtDivState with 5+ producers serializes to ~1 KB, well above the 800-byte limit.
+    // Note: 200 bytes was too small — the ChunkedValueManifest itself (containing chunk keys at
+    // ~66 bytes each) would exceed the per-message limit when 3+ chunks were needed, causing a
+    // silent "manifest too big" exception. 800 bytes still forces chunking but leaves enough
+    // room for the manifest.
     Properties chunkingExtraProperties = createExtraProperties();
-    chunkingExtraProperties.setProperty(VeniceWriter.MAX_SIZE_FOR_USER_PAYLOAD_PER_MESSAGE_IN_BYTES, "200");
+    chunkingExtraProperties.setProperty(VeniceWriter.MAX_SIZE_FOR_USER_PAYLOAD_PER_MESSAGE_IN_BYTES, "800");
 
     try (VeniceClusterWrapper chunkingVenice = ServiceFactory.getVeniceCluster(
         new VeniceClusterCreateOptions.Builder().numberOfControllers(1)
@@ -975,11 +979,12 @@ public class TestGlobalRtDiv {
     int MESSAGES_PER_WRITER = 50;
     int serverCount = 2;
 
-    // With MAX_SIZE_FOR_USER_PAYLOAD = 400 bytes:
+    // With MAX_SIZE_FOR_USER_PAYLOAD = 600 bytes:
     // Phase 1 (1 writer, state ~200 bytes) → non-chunked (fits in a single message)
     // Phase 2 (6 total writers, state ~1 KB) → chunked (split across multiple messages)
+    // 600 bytes ensures the manifest fits even with 3+ chunks (each chunk key ~66 bytes).
     Properties extraProps = createExtraProperties();
-    extraProps.setProperty(VeniceWriter.MAX_SIZE_FOR_USER_PAYLOAD_PER_MESSAGE_IN_BYTES, "400");
+    extraProps.setProperty(VeniceWriter.MAX_SIZE_FOR_USER_PAYLOAD_PER_MESSAGE_IN_BYTES, "600");
 
     try (VeniceClusterWrapper chunkingVenice = ServiceFactory.getVeniceCluster(
         new VeniceClusterCreateOptions.Builder().numberOfControllers(1)
@@ -1277,6 +1282,59 @@ public class TestGlobalRtDiv {
           }
         });
       }
+    }
+  }
+
+  /**
+   * Verifies that EOP alone (not byte-threshold syncs) triggers a Global RT DIV OffsetRecord sync on
+   * the remote-VT leader. Both the transactional-mode and deferred-write-mode sync thresholds are
+   * pushed above the dataset size, so {@code shouldSendGlobalRtDiv}'s byte-threshold branch cannot
+   * fire during the small batch push. The only sync trigger remaining is the non-segment-control-
+   * message branch in {@code addVtDivToProducerCallbackIfNeeded} — specifically, the EOP produced to
+   * local VT after the leader consumes EOP from remote VT. If that branch is absent (the pre-fix
+   * behavior), LCVP stays at EARLIEST on the dc-1 leader's OffsetRecord after batch push completes.
+   */
+  @Test(timeOut = 180 * Time.MS_PER_SECOND)
+  public void testBatchOnlyNRRemoteVTLeaderEopTriggersLcvpSyncWithHighByteThreshold() throws Exception {
+    int PARTITION = 0;
+    // 100 MB thresholds for both transactional and deferred-write modes — well above the 100-record
+    // batch push payload — so the byte-threshold branch of shouldSendGlobalRtDiv cannot fire and EOP
+    // becomes the only possible sync trigger for LCVP on the remote-VT leader.
+    Properties extraServerProps = new Properties();
+    extraServerProps.setProperty(SERVER_DATABASE_SYNC_BYTES_INTERNAL_FOR_TRANSACTIONAL_MODE, "104857600");
+    extraServerProps.setProperty(SERVER_DATABASE_SYNC_BYTES_INTERNAL_FOR_DEFERRED_WRITE_MODE, "104857600");
+
+    try (NRGlobalRtDivBatchEnv env = setUpNRGlobalRtDivBatchPushed(
+        "venice-cluster0",
+        "nrRemoteVtLeaderEopSync",
+        100,
+        1,
+        PARTITION,
+        extraServerProps)) {
+      VeniceClusterWrapper remoteDcCluster = env.remoteDcCluster;
+      String topicName = env.topicName;
+
+      TestUtils.waitForNonDeterministicAssertion(60, TimeUnit.SECONDS, true, true, () -> {
+        Instance currentLeader = env.routingDataRepo.getLeaderInstance(topicName, PARTITION);
+        assertNotNull(currentLeader, "Leader should be assigned in remote dc for partition " + PARTITION);
+        VeniceServerWrapper currentLeaderWrapper = remoteDcCluster.getVeniceServerByPort(currentLeader.getPort());
+        assertNotNull(currentLeaderWrapper, "Leader server wrapper not found");
+        OffsetRecord offsetRecord = getRemoteDcLeaderOffsetRecord(currentLeaderWrapper, topicName, PARTITION);
+        assertTrue(
+            offsetRecord.isEndOfPushReceived(),
+            "EOP must be processed on dc-1 leader before checking LCVP — otherwise we're racing the push.");
+        PubSubPosition lcvp = offsetRecord.getLatestConsumedVtPosition();
+        assertNotEquals(
+            lcvp,
+            PubSubSymbolicPosition.EARLIEST,
+            "LCVP should be persisted (non-EARLIEST) on dc-1 leader after batch push with high byte "
+                + "thresholds. Without the EOP-sync trigger on addVtDivToProducerCallbackIfNeeded, "
+                + "the only possible sync path (byte threshold) is disabled and LCVP stays at EARLIEST.");
+        LOGGER.info(
+            "event=globalRtDiv LCVP on dc-1 leader {} (high-threshold): {}",
+            currentLeaderWrapper.getAddress(),
+            lcvp);
+      });
     }
   }
 
